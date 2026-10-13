@@ -74,6 +74,7 @@ button { font: inherit; color: inherit; }
 .card.sel { border: 2px solid var(--sel-edge); padding: 7px 9px; background: #f4f8fc; }
 .card.fault { box-shadow: inset 4px 0 0 var(--bad); }
 .card.unassigned { background: #fbf3dc; }
+.card.add-card { border-style: dashed; background: var(--group); justify-content: center; align-items: center; text-align: center; }
 .card-top { display: flex; justify-content: space-between; align-items: baseline; }
 .card-name { font-size: 18px; font-weight: 600; }
 .card-id { font-family: var(--mono); color: var(--ink-3); font-size: 12px; }

@@ -11,6 +11,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from . import motion as M
 from . import protocol as P
-from .config import Config, write_atomic
+from .config import Config, default_motors, is_preset_layout, relayout_motors, write_atomic
 
 log = logging.getLogger("kinetic.engine")
 
@@ -572,6 +573,110 @@ class Engine:
             self.startup = "ready (autoplay off)" if homed else "not homed"
 
 
+    # ================================================================ adding / removing motors
+    #
+    # Motor numbers are positions in the radio frame (M1 = slot 0 ...), so removing a motor from
+    # the middle renumbers the ones after it: their boards are told their new number over the
+    # radio, and their setup data and per-motor show data move with them.
+
+    def add_motor(self) -> int:
+        n = self.cfg.motor_count
+        if n >= P.MAX_MOTORS:
+            raise ValueError(f"The radio frame holds at most {P.MAX_MOTORS} motors")
+        self.arm(False)
+        layout = self.cfg.data.get("layout", "line")
+        if is_preset_layout(self.cfg.motors, layout):
+            motors = relayout_motors(self.cfg.motors, n + 1, layout)
+        else:                                   # hand-placed: keep them, put the new one in the middle
+            motors = self.cfg.motors + [default_motors(1, layout)[0] | {"id": n, "name": f"M{n + 1}"}]
+        self.cfg.data["motors"] = motors
+        self.cfg.save()
+        self.resize()
+        self._shift_show(insert_at=n)
+        self.event(f"Added motor M{n + 1}")
+        return n
+
+    def remove_motors(self, ids: list[int]):
+        ids = sorted({int(i) for i in ids if 0 <= int(i) < self.cfg.motor_count}, reverse=True)
+        if not ids:
+            return
+        if len(ids) >= self.cfg.motor_count:
+            raise ValueError("Keep at least one motor")
+        if self.wizard and self.wizard["motor"] in ids:
+            self.wiz_cancel()
+        self.arm(False)
+        layout = self.cfg.data.get("layout", "line")
+        preset = is_preset_layout(self.cfg.motors, layout)
+        online = self.online_nodes()
+        names = [m["name"] for m in self.cfg.motors]
+        for i in ids:                           # highest first, so lower numbers stay valid
+            for nd in online:
+                sid = nd["status"].id
+                if sid == i:
+                    self.send_cmd(P.C_SET_ID, mac=nd["mac"], args=[P.ID_UNASSIGNED])
+            self.cfg.motors.pop(i)
+            self._shift_show(remove_at=i)
+        # renumber the rest, and tell each remaining board its (possibly new) number
+        old_ids = [m["id"] for m in self.cfg.motors]
+        for new_id, m in enumerate(self.cfg.motors):
+            old = m["id"]
+            m["id"] = new_id
+            if re.fullmatch(r"M\d+", m.get("name", "")):
+                m["name"] = f"M{new_id + 1}"
+            if old != new_id:
+                for nd in online:
+                    if nd["status"].id == old:
+                        self.send_cmd(P.C_SET_ID, mac=nd["mac"], args=[new_id])
+        if preset:
+            self.cfg.data["motors"] = relayout_motors(self.cfg.motors, len(self.cfg.motors), layout)
+        self.cfg.save()
+        self.resize()
+        removed = ", ".join(names[i] for i in sorted(ids))
+        moved = sum(1 for o, m in zip(old_ids, self.cfg.motors) if o != m["id"])
+        self.event(f"Removed {removed}" + (f"; {moved} motor(s) after it were renumbered" if moved else ""))
+
+    def remove_unused(self):
+        """Remove every motor that hasn't been through Motor Setup and has no board reporting."""
+        seen = {nd["status"].id for nd in self.online_nodes()}
+        unused = [i for i, m in enumerate(self.cfg.motors) if not m.get("commissioned") and i not in seen]
+        if len(unused) >= self.cfg.motor_count:
+            unused = unused[1:]                 # always keep one
+        self.remove_motors(unused)
+        return len(unused)
+
+    def _shift_show(self, remove_at: int | None = None, insert_at: int | None = None):
+        """Keep per-motor show data (static poses, per-motor timeline curves) attached to the
+        right motor when motors are removed or added."""
+        changed = False
+        for c in self.show.get("clips", []):
+            vals = (c.get("params") or {}).get("values")
+            if isinstance(vals, list):
+                if remove_at is not None and remove_at < len(vals):
+                    vals.pop(remove_at)
+                    changed = True
+                elif insert_at is not None and insert_at <= len(vals):
+                    vals.insert(insert_at, vals[-1] if vals else 0.0)
+                    changed = True
+            tracks = c.get("tracks")
+            if c.get("mode") == "per_motor" and isinstance(tracks, dict):
+                new = {}
+                for k, v in tracks.items():
+                    if not k.isdigit():
+                        new[k] = v
+                        continue
+                    j = int(k)
+                    if remove_at is not None:
+                        if j == remove_at:
+                            continue
+                        j = j - 1 if j > remove_at else j
+                    new[str(j)] = v
+                if insert_at is not None and str(insert_at) not in new and tracks:
+                    new[str(insert_at)] = copy.deepcopy(tracks.get(str(insert_at - 1)) or next(iter(tracks.values())))
+                c["tracks"] = new
+                changed = True
+        if changed:
+            self.save_show(self.show)
+
     # ================================================================ Motor Setup wizard
     #
     # Steps (the UI walks through them; each step is a command below):
@@ -594,6 +699,11 @@ class Engine:
             self.wizard.update(kw)
 
     def wiz_start(self, mac: str, motor: int, recover: bool = False):
+        added = False
+        if motor == self.cfg.motor_count:       # "New motor" chosen in the wizard
+            motor = self.add_motor()
+            added = True
+            recover = False
         if not 0 <= motor < self.cfg.motor_count:
             raise ValueError("motor out of range")
         with self.lock:
@@ -613,7 +723,7 @@ class Engine:
         self.wizard = {"mac": mac, "motor": motor, "recover": recover,
                        "step": "top" if recover else "direction", "busy": False, "msg": "", "error": "",
                        "dir_tested": False, "encoder_ok": False, "top_set": False, "bottom_mm": None,
-                       "test_done": False, "was_commissioned": bool(m.get("commissioned"))}
+                       "test_done": False, "was_commissioned": bool(m.get("commissioned")), "added": added}
         self._wiz_later(self._wiz_prepare())
         self.event(("Motor Setup (find top)" if recover else "Motor Setup") + f" started for M{motor + 1}")
 
@@ -862,6 +972,9 @@ class Engine:
             self.push_limits(i)                    # put the previous limits back
         self.event(f"Motor Setup cancelled for M{i + 1}")
         self.wizard = None
+        if w.get("added") and i == self.cfg.motor_count - 1 and self.cfg.motor_count > 1 \
+                and not self.cfg.motors[i].get("commissioned"):
+            self.remove_motors([i])                # the new slot was never set up: take it away again
 
     def wizard_snapshot(self) -> dict | None:
         w = self.wizard

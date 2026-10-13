@@ -60,6 +60,8 @@
 .slot-grid .mid small { font-size: 11px; color: var(--ink-3); }
 .slot-grid .mid.sel { border: 2px solid var(--sel-edge); background: #f4f8fc; }
 .slot-grid .mid.taken { background: #e4e6e9; }
+.slot-grid .mid.add { grid-column: span 2; border-style: dashed; background: var(--field); font-weight: 600; }
+.slot-grid .mid.add.sel { border-style: solid; }
 .sec-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .sec-row .mid { min-height: 44px; }
 .step-actions.sticky { position: sticky; bottom: -14px; background: var(--group); padding: 10px 0 14px; margin-bottom: -14px; border-top: 1px solid var(--line-2); }

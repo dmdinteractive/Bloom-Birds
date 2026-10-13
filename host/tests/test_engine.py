@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kinetic import protocol as P  # noqa: E402
-from kinetic.config import Config  # noqa: E402
+from kinetic.config import Config, default_motors  # noqa: E402
 from kinetic.engine import Engine  # noqa: E402
 from kinetic.transport import SimTransport  # noqa: E402
 
@@ -28,6 +28,7 @@ class Recorder(SimTransport):
 @pytest.fixture
 def setup(tmp_path):
     cfg = Config(tmp_path / "config.json")
+    cfg.data["motors"] = default_motors(8)
     cfg.data["mechanics"]["home_timeout_s"] = 5
     tx = Recorder(cfg.motor_count, cfg.node_config_args())
     eng = Engine(cfg, tx, tmp_path / "shows")

@@ -132,6 +132,15 @@ Setup…*), or at `http://<pi>:8080/setup`.
 | 6. Test | A slow move to the middle, the bottom and back to the top, inside the limits. |
 | 7. Save | The motor's travel becomes the distance you taught. Shows scale to it automatically. |
 
+**Adding and removing motors.** A new install starts with one motor.
+- **Add a motor** with **Add Motor…** (editor Axes tab, panel System view, or the dashed **+ Add Motor**
+  card on the panel's Axes view). It opens Motor Setup with *+ New motor* selected; the new slot is
+  only kept if you finish the setup.
+- **Remove a motor** with the **Remove** button next to it. Its board is released. The motors after it
+  move down one number, and their boards are renumbered over the radio automatically. Their setup
+  data and per-motor show data (static poses, per-motor curves in the active show) move with them.
+- **Remove Unused** removes every motor that hasn't been set up and has no board reporting.
+
 **How a motor knows its position after a power cut.** The encoder reports the shaft angle
 exactly, but only within one turn. It doesn't count turns.
 - **Taught top:** *Set as top* stores the magnet angle at 0 mm.
@@ -220,8 +229,8 @@ and an unreadable file is set aside while a working show loads.
 1. **Setup → Mechanics:** enter the spool diameter (measure with cable on it), travel,
    and max speed/acceleration. Start conservative, e.g. 80 mm/s and 150 mm/s². Choose a
    homing mode. **Apply & Send to Axes.**
-2. **Setup → Axis Layout:** set the motor count and where each hangs, seen from above.
-   Waves, ripples and spins use these positions.
+2. **Setup → Axis Layout:** set where each motor hangs, seen from above. Waves, ripples and
+   spins use these positions. Add motors with **Add Motor…** as you build (section 3a).
 3. **Axes tab:** new PD Steppers show as *unassigned*. Click **Identify** (its LEDs
    flash), then pick which motor it is.
 4. **Motor Setup for every motor** (section 3a). It sets direction, checks the encoder and
@@ -310,7 +319,7 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 46 automated tests. They include:
+- **Pi software** is covered by 51 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;

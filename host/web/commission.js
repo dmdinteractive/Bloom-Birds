@@ -14,6 +14,7 @@ const Q = new URLSearchParams(location.search);
 const FROM = Q.get("from") === "editor" ? "/" : "/panel";
 if (Q.get("mac")) C.selMac = Q.get("mac");
 if (Q.get("motor") !== null && Q.get("motor") !== "") C.selMotor = +Q.get("motor");
+C.wantNew = Q.get("new") === "1";          // opened from an "Add Motor" button
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -183,12 +184,14 @@ function chooseHtml() {
     if (pick) C.selMac = pick.mac;
   }
   const sel = nodes.find((nd) => nd.mac === C.selMac);
-  if (sel && C.selMotor === null && sel.id !== null) C.selMotor = sel.id;
   const n = C.config.motors.length;
+  if (C.wantNew && C.selMotor === null && (!sel || sel.id === null)) C.selMotor = n;
+  if (sel && C.selMotor === null && sel.id !== null) C.selMotor = sel.id;
+  const isNew = C.selMotor === n;
   const holder = (i) => nodes.find((nd) => nd.id === i && nd.mac !== C.selMac);
   const comm = C.tick?.commissioned || [];
   const lost = sel && C.selMotor === sel.id && nodeState(sel)[0] === "bad";
-  const canRecover = sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost;
+  const canRecover = !isNew && (sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost);
   return `
     <div class="step-title">Choose the motor to set up</div>
     <div class="sec-row"><span class="section-h">1. Board</span>
@@ -205,11 +208,11 @@ function chooseHtml() {
       const h = holder(i);
       return `<button class="mid ${C.selMotor === i ? "sel" : ""} ${h ? "taken" : ""}" data-slot="${i}">${esc(mname(i))}
         <small>${comm[i] ? "set up" : h ? "assigned" : "empty"}</small></button>`;
-    }).join("")}</div>
+    }).join("")}${n < 16 ? `<button class="mid add ${isNew ? "sel" : ""}" data-slot="${n}">+ New motor<small>becomes M${n + 1}</small></button>` : ""}</div>
     ${C.selMotor !== null && holder(C.selMotor) ? `<div class="msg">${esc(mname(C.selMotor))} is currently driven by board ${esc(holder(C.selMotor).mac)}. Starting setup moves it to the selected board.</div>` : ""}
     <div class="spacer"></div>
     <div class="step-actions sticky">
-      <button class="big go" data-act="start" ${sel && C.selMotor !== null ? "" : "disabled"}>Start full setup</button>
+      <button class="big go" data-act="start" ${sel && C.selMotor !== null ? "" : "disabled"}>${isNew ? `Add M${n + 1} and start setup` : "Start full setup"}</button>
       ${canRecover ? `<button class="big primary" data-act="recover">Find top only</button>` : ""}
       <span class="hint">${canRecover ? "Find top only: for a motor that lost its position. Keeps its bottom limit." : ""}</span>
     </div>`;
@@ -227,7 +230,12 @@ function doneHtml() {
 
 $("#stepBox").addEventListener("click", async (ev) => {
   const pick = ev.target.closest("[data-mac]");
-  if (pick) { C.selMac = pick.dataset.mac; const nd = C.tick.nodes.find((x) => x.mac === C.selMac); C.selMotor = nd?.id ?? null; C.key = ""; render(); return; }
+  if (pick) {
+    C.selMac = pick.dataset.mac;
+    const nd = C.tick.nodes.find((x) => x.mac === C.selMac);
+    C.selMotor = nd?.id ?? (C.wantNew ? C.config.motors.length : null);
+    C.key = ""; render(); return;
+  }
   const slot = ev.target.closest("[data-slot]");
   if (slot) { C.selMotor = +slot.dataset.slot; C.key = ""; render(); return; }
   const jog = ev.target.closest("[data-jog]");
@@ -251,7 +259,7 @@ $("#stepBox").addEventListener("click", async (ev) => {
   else if (a === "test") send("wiz_test");
   else if (a === "skip_test") send("wiz_goto", { step: "finish" });
   else if (a === "finish") { C.finished = { motor: C.tick.wizard.motor, recover: C.tick.wizard.recover }; send("wiz_finish"); }
-  else if (a === "another") { C.finished = null; C.selMac = null; C.selMotor = null; C.key = ""; render(); }
+  else if (a === "another") { C.finished = null; C.selMac = null; C.selMotor = null; C.wantNew = true; C.key = ""; render(); }
   else if (a === "exit") location.href = FROM;
 });
 

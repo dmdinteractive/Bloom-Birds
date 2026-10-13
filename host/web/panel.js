@@ -64,7 +64,12 @@ function connectWs() {
   ws.onclose = () => { P.wsOk = false; setTimeout(connectWs, 1500); };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
-    if (m.type === "tick") { P.tick = m; if (m.events) addEvents(m.events); }
+    if (m.type === "tick") {
+      P.tick = m; if (m.events) addEvents(m.events);
+      if (P.config && m.travel && m.travel.length !== P.config.motors.length && !P.reloading) {   // motors added/removed
+        P.reloading = true; loadState().then(() => { P.cardsKey = ""; P.actionsKey = ""; }).finally(() => { P.reloading = false; });
+      }
+    }
     else if (m.type === "events") addEvents(m.events);
     else if (m.type === "error") toast(m.msg, true);
   };
@@ -221,7 +226,10 @@ function renderAxes() {
       unassigned.map((nd) => `<button class="card unassigned" data-mac="${nd.mac}">
         <div class="card-top"><span class="card-name">New node</span><span class="card-id">unassigned</span></div>
         <div class="card-pos" style="font-size:14px">${esc(nd.mac)}</div>
-        <div class="card-fault" style="color:#8a5a00">Tap to identify and set up</div></button>`).join("");
+        <div class="card-fault" style="color:#8a5a00">Tap to identify and set up</div></button>`).join("") +
+      (P.config.motors.length < 16 ? `<button class="card add-card" data-add="1">
+        <div class="card-name">+ Add Motor</div>
+        <div class="card-fault" style="color:var(--ink-3)">Set up a new PD Stepper as M${P.config.motors.length + 1}</div></button>` : "");
   }
   $$("#axisCards .card[data-axis]").forEach((card) => {
     const i = +card.dataset.axis, nd = nodeFor(i), fault = nodeFault(nd), f = nd?.flags || [];
@@ -257,10 +265,12 @@ function renderAxisActions() {
     <span class="sep"></span>
     ${mem ? "" : `<button class="mid" data-act="zero" ${dis}>Set Zero</button>`}
     <button class="mid" data-act="release" ${dis}>Release</button>
+    <button class="mid" data-act="remove" ${P.config.motors.length <= 1 ? "disabled" : ""}>Remove</button>
     ${armed ? `<span class="note">Disable axes to jog, zero or release.</span>` : `<span class="note">▲ winds in · ▼ pays out (mm)</span>`}`;
 }
 $("#axisCards").addEventListener("click", async (ev) => {
   const card = ev.target.closest(".card"); if (!card) return;
+  if (card.dataset.add) { location.href = setupUrl({ new: 1 }); return; }
   if (card.dataset.axis !== undefined) { P.selAxis = +card.dataset.axis; P.actionsKey = ""; renderAxes(); return; }
   const mac = card.dataset.mac;
   send("identify", { mac });
@@ -284,6 +294,13 @@ $("#axisActions").addEventListener("click", async (ev) => {
     case "jog": send("jog", { id: i, mm: +b.dataset.mm }); break;
     case "zero": if (await confirmBox(`Set ${name}'s current position as home (fully wound in)?`, "Set Zero")) send("set_zero", { id: i }); break;
     case "release": send("enable", { id: i, on: false }); toast(`${name} released`); break;
+    case "remove": {
+      const later = nAxes() - 1 - i;
+      const msg = `Remove ${name}? Its board is released and its setup is discarded.` +
+        (later > 0 ? ` The ${later} motor(s) after it move down one number; their boards are renumbered automatically.` : "");
+      if (await confirmBox(msg, "Remove", true)) { send("remove_motor", { id: i }); P.selAxis = Math.max(0, i - 1); toast(`${name} removed`); }
+      break;
+    }
   }
 });
 
@@ -376,6 +393,11 @@ $("#v-system").addEventListener("click", async (ev) => {
   const b = ev.target.closest("[data-sys]"); if (!b) return;
   const a = b.dataset.sys;
   if (a === "setup") { location.href = setupUrl({}); return; }
+  if (a === "add_motor") { location.href = setupUrl({ new: 1 }); return; }
+  if (a === "remove_unused") {
+    if (await confirmBox("Remove every motor that hasn't been set up and has no board reporting?", "Remove", true)) send("remove_unused");
+    return;
+  }
   if (a === "sim_cut" || a === "sim_cut_fail") {
     const ok = await confirmBox(a === "sim_cut" ? "SIMULATOR: cut power to every motor? Their power-loss save works." :
       "SIMULATOR: cut power to every motor, with the power-loss save FAILING? Motors that were moving lose their position.", "Cut power", true);

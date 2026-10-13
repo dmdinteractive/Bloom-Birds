@@ -71,6 +71,10 @@ function connectWs() {
       const prevClip = S.tick?.clip, prevMode = S.tick?.mode, prevEntry = S.tick?.entry;
       S.tick = m;
       if (m.events) addEvents(m.events);
+      // motors added or removed (here or on another screen): reload the motor list once
+      if (S.config && m.travel && m.travel.length !== S.config.motors.length && !S.reloading) {
+        S.reloading = true; loadState().finally(() => { S.reloading = false; });
+      }
       if (m.clip !== prevClip || m.mode !== prevMode || m.entry !== prevEntry) markPlaying();
     } else if (m.type === "events") addEvents(m.events);
     else if (m.type === "error") toast(m.msg, true);
@@ -713,15 +717,27 @@ function renderNodes() {
         <button class="btn small" data-node="jog" data-id="${id}" data-mm="10" title="Pay out 10 mm">+10</button>
         <button class="btn small" data-node="jog" data-id="${id}" data-mm="50" title="Pay out 50 mm">+50</button>
         <span class="gsep"></span>
-        <button class="btn small" data-node="enable" data-id="${id}" data-on="0">Release</button>` : ""}
+        <button class="btn small" data-node="enable" data-id="${id}" data-on="0">Release</button>
+        <button class="btn small" data-node="remove" data-id="${id}" title="Remove this motor from the sculpture">Remove</button>` : ""}
       </div></td></tr>`;
   }).join("") || `<tr><td colspan="12" class="sub">No axis nodes detected. Check the bridge connection and node power.</td></tr>`;
   const missing = S.config.motors.map((m, i) => i).filter((i) => !S.tick.nodes.some((nd) => nd.online && nd.id === i));
-  if (missing.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="12" class="sub">Not detected: ${missing.map((i) => esc(S.config.motors[i].name)).join(", ")}</td></tr>`);
+  if (missing.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="12" class="sub">Not detected: ${missing.map((i) =>
+    `${esc(S.config.motors[i].name)} <button class="btn small" data-node="remove" data-id="${i}" title="Remove ${esc(S.config.motors[i].name)}">Remove</button>`).join(" &nbsp; ")}</td></tr>`);
 }
 $("#nodeRows").addEventListener("click", (ev) => {
   const b = ev.target.closest("button[data-node]"); if (!b) return;
   const a = b.dataset.node, id = b.dataset.id !== undefined ? +b.dataset.id : undefined;
+  if (a === "remove") {
+    const name = S.config.motors[id]?.name || `M${id + 1}`;
+    if (S.config.motors.length <= 1) { toast("Keep at least one motor", true); return; }
+    const later = S.config.motors.length - 1 - id;
+    if (confirm(`Remove ${name}? Its board is released, and its setup is discarded.` +
+      (later > 0 ? `\n\nThe ${later} motor(s) after it move down one number (their boards are renumbered automatically).` : ""))) {
+      send("remove_motor", { id }); setTimeout(loadState, 600);
+    }
+    return;
+  }
   if (a === "identify") send("identify", { mac: b.dataset.mac });
   else if (a === "setup") location.href = `/setup?from=editor&mac=${encodeURIComponent(b.dataset.mac)}${id !== undefined ? `&motor=${id}` : ""}`;
   else if (a === "jog") send("jog", { id, mm: +b.dataset.mm });
@@ -738,6 +754,10 @@ $$("[data-all]").forEach((b) => b.addEventListener("click", () => {
   else if (a === "set_zero") { if (confirm("Set every axis' current position as home (fully wound in)?")) send("set_zero", { id: "all" }); }
   else if (a === "autostart") send(a);
   else if (a === "setup") location.href = "/setup?from=editor";
+  else if (a === "add_motor") location.href = "/setup?from=editor&new=1";
+  else if (a === "remove_unused") {
+    if (confirm("Remove every motor that hasn't been set up and has no board reporting?")) { send("remove_unused"); setTimeout(loadState, 600); }
+  }
   else if (a === "sim_cut") { if (confirm("SIMULATOR: cut power to every motor (power-loss save works)?")) send("sim_power_cut", { save_works: true }); }
   else if (a === "sim_cut_fail") { if (confirm("SIMULATOR: cut power with the power-loss save FAILING? Moving motors lose their position.")) send("sim_power_cut", { save_works: false }); }
   else send(a, { id: "all" });

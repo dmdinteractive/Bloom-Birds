@@ -207,6 +207,13 @@ def handle_command(engine: Engine, msg: dict):
         engine.push_config(_target(msg))
     elif c == "autostart":
         asyncio.get_running_loop().create_task(engine.autostart())
+    # ---- adding / removing motors
+    elif c == "add_motor":
+        engine.add_motor()
+    elif c == "remove_motor":
+        engine.remove_motors([int(msg["id"])])
+    elif c == "remove_unused":
+        engine.remove_unused()
     # ---- Motor Setup wizard
     elif c == "wiz_start":
         engine.wiz_start(msg["mac"], int(msg["motor"]), bool(msg.get("recover")))

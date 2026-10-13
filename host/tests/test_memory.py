@@ -309,3 +309,71 @@ def test_recover_mode_reteaches_top_and_keeps_bottom(rig):
     st = eng.node_by_id(0)["status"]
     assert st.has("homed") and st.has("limits")
     assert abs(st.lim_max - cfg.bottom_usteps(0)) <= 1
+
+
+# ---------------------------------------------------------------- adding / removing motors
+
+def _run(eng, seconds):
+    async def go():
+        t = asyncio.create_task(eng.run())
+        await asyncio.sleep(seconds)
+        t.cancel()
+    asyncio.run(go())
+
+
+def test_new_install_starts_with_one_motor(tmp_path):
+    assert Config(tmp_path / "c.json").motor_count == 1
+
+
+def test_remove_middle_motor_renumbers_boards_and_data(rig):
+    cfg, tx, eng = rig
+    cfg.motors[2].update({"commissioned": True, "bottom_fs": 2222.0, "node_mac": "5E:00:00:00:00:02"})
+    pose = {"id": "pz", "name": "pose", "type": "pattern", "pattern": "pose", "duration": 5, "fade": 0,
+            "params": {"values": [0.0, 0.1, 0.2, 0.3]}}
+    eng.save_show({**eng.show, "clips": eng.show["clips"] + [pose]})
+    _run(eng, 0.6)
+    eng.remove_motors([1])
+    _run(eng, 0.6)
+    assert cfg.motor_count == 3 and [m["id"] for m in cfg.motors] == [0, 1, 2]
+    assert [m["name"] for m in cfg.motors] == ["M1", "M2", "M3"]
+    # the board that was M3 is now M2 and carries its setup with it
+    assert next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:02").id == 1
+    assert cfg.motors[1]["bottom_fs"] == 2222.0
+    assert next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:01").id == P.ID_UNASSIGNED
+    assert next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:03").id == 2
+    assert eng.clip("pz")["params"]["values"] == [0.0, 0.2, 0.3]
+
+
+def test_cannot_remove_the_last_motor(rig):
+    cfg, tx, eng = rig
+    with pytest.raises(ValueError):
+        eng.remove_motors(list(range(cfg.motor_count)))
+
+
+def test_add_motor_and_remove_unused(rig):
+    cfg, tx, eng = rig
+    _run(eng, 0.6)
+    eng.add_motor()
+    eng.add_motor()
+    assert cfg.motor_count == 6 and cfg.motors[5]["name"] == "M6"
+    _run(eng, 0.6)
+    assert eng.remove_unused() == 2          # M5, M6: not set up, no board reporting
+    assert cfg.motor_count == 4
+
+
+def test_wizard_new_slot_adds_motor_and_cancel_takes_it_away(rig):
+    cfg, tx, eng = rig
+    fresh = next(n for n in tx.nodes if n.id == P.ID_UNASSIGNED)
+
+    async def go():
+        t = asyncio.create_task(eng.run())
+        await asyncio.sleep(0.6)
+        eng.wiz_start(fresh.mac, cfg.motor_count)        # "New motor"
+        await asyncio.sleep(1.0)
+        assert cfg.motor_count == 5 and fresh.id == 4 and eng.wizard["added"]
+        eng.wiz_cancel()
+        await asyncio.sleep(0.6)
+        t.cancel()
+    asyncio.run(go())
+    assert cfg.motor_count == 4
+    assert fresh.id == P.ID_UNASSIGNED

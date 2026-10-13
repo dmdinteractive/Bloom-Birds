@@ -107,6 +107,13 @@ def relayout_motors(old: list[dict], n: int, layout: str) -> list[dict]:
     return out
 
 
+def is_preset_layout(motors: list[dict], layout: str) -> bool:
+    """True when every motor still sits where the layout preset put it (not hand-placed)."""
+    ref = default_motors(len(motors), layout)
+    return all(abs(m.get("x", 0) - r["x"]) < 1e-3 and abs(m.get("y", 0) - r["y"]) < 1e-3
+               for m, r in zip(motors, ref))
+
+
 class Config:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -117,7 +124,7 @@ class Config:
             except ValueError:
                 self.path.replace(self.path.with_suffix(".corrupt"))   # keep defaults, keep evidence
         if not self.data["motors"]:
-            self.data["motors"] = default_motors(8, self.data["layout"])
+            self.data["motors"] = default_motors(1, self.data["layout"])   # add more with "Add Motor"
 
     # ---------- persistence ----------
     def update(self, new: dict):
