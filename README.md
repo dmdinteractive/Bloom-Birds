@@ -133,6 +133,10 @@ Setup…*), or at `http://<pi>:8080/setup`.
 | 7. Save | The motor's travel becomes the distance you taught. Shows scale to it automatically. |
 
 **Adding and removing motors.** A new install starts with one motor.
+- **Set how many positions** with the **Motors − N +** control (editor Axes tab, panel System view).
+  **+** adds an empty position: it shows as a dashed card, isn't counted as a fault, and doesn't
+  hold up startup. Set it up when its board is installed. **−** removes the last position (it asks
+  first if that motor is set up).
 - **Add a motor** with **Add Motor…** (editor Axes tab, panel System view, or the dashed **+ Add Motor**
   card on the panel's Axes view). It opens Motor Setup with *+ New motor* selected; the new slot is
   only kept if you finish the setup.
@@ -319,7 +323,7 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 51 automated tests. They include:
+- **Pi software** is covered by 52 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;

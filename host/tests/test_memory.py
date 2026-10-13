@@ -377,3 +377,16 @@ def test_wizard_new_slot_adds_motor_and_cancel_takes_it_away(rig):
     asyncio.run(go())
     assert cfg.motor_count == 4
     assert fresh.id == P.ID_UNASSIGNED
+
+
+def test_set_motor_count(rig):
+    cfg, tx, eng = rig
+    _run(eng, 0.6)
+    eng.set_motor_count(6)
+    assert cfg.motor_count == 6
+    eng.set_motor_count(4)                    # removes the two empty slots, no confirmation needed
+    assert cfg.motor_count == 4
+    with pytest.raises(ValueError):
+        eng.set_motor_count(2)                # M3, M4 have boards reporting
+    eng.set_motor_count(2, force=True)
+    assert cfg.motor_count == 2

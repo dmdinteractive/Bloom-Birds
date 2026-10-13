@@ -212,6 +212,8 @@ def handle_command(engine: Engine, msg: dict):
         engine.add_motor()
     elif c == "remove_motor":
         engine.remove_motors([int(msg["id"])])
+    elif c == "set_motor_count":
+        engine.set_motor_count(int(msg["n"]), bool(msg.get("force")))
     elif c == "remove_unused":
         engine.remove_unused()
     # ---- Motor Setup wizard

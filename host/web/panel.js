@@ -109,6 +109,9 @@ function nodeFault(nd) {
 const memoryMode = () => (P.tick?.home_mode || P.config?.mechanics.home_mode) === "memory";
 const travelOf = (i) => P.tick?.travel?.[i] ?? (P.config.motors[i].travel_mm || P.config.mechanics.travel_mm);
 const setupUrl = (q) => `/setup?from=panel&${new URLSearchParams(q)}`;
+// A position that has never been set up and has no board yet is "empty", not a fault.
+const isEmptySlot = (i) => !P.tick?.commissioned?.[i] && !(P.tick?.nodes || []).some((nd) => nd.id === i);
+const slotFault = (i) => (isEmptySlot(i) ? "" : nodeFault(nodeFor(i)));
 const nodeFor = (i) => (P.tick?.nodes || []).find((nd) => nd.online && nd.id === i) || (P.tick?.nodes || []).find((nd) => nd.id === i);
 
 // ------------------------------------------------------------ top bar + status
@@ -120,7 +123,7 @@ function renderTop() {
     L.push(`<span class="light">${led(tk.link ? "on" : "bad")}Bridge</span>`);
     const ids = new Set(tk.nodes.filter((nd) => nd.online && nd.id !== null && nd.id < nAxes()).map((nd) => nd.id));
     const homed = [...ids].filter((i) => nodeFor(i)?.flags.includes("homed")).length;
-    const faults = P.config.motors.filter((m, i) => nodeFault(nodeFor(i))).length;
+    const faults = P.config.motors.filter((m, i) => slotFault(i)).length;
     L.push(`<span class="light">${led(ids.size === nAxes() ? "on" : ids.size ? "warn" : "bad")}Axes <b>${ids.size}/${nAxes()}</b></span>`);
     L.push(`<span class="light">${led(homed === nAxes() ? "on" : homed ? "warn" : "")}${memoryMode() ? "Located" : "Homed"} <b>${homed}/${nAxes()}</b></span>`);
     L.push(`<span class="light">${led(faults ? "bad" : "")}Faults <b>${faults}</b></span>`);
@@ -132,8 +135,8 @@ function renderTop() {
 
     $("#stState").textContent = `${tk.armed ? "Axes enabled" : "Axes disabled"} · ${tk.startup === "running" ? "running" : "startup: " + tk.startup}`;
     const exc = $("#stException");
-    const fi = P.config.motors.findIndex((m, i) => nodeFault(nodeFor(i)));
-    if (fi >= 0) { exc.className = "exc bad"; exc.textContent = `${P.config.motors[fi].name}: ${nodeFault(nodeFor(fi))}`; }
+    const fi = P.config.motors.findIndex((m, i) => slotFault(i));
+    if (fi >= 0) { exc.className = "exc bad"; exc.textContent = `${P.config.motors[fi].name}: ${slotFault(fi)}`; }
     else if (P.lastWarn && Date.now() / 1000 - P.lastWarn.t < 120) { exc.className = "exc warn"; exc.textContent = P.lastWarn.msg; }
     else { exc.className = "exc"; exc.textContent = "No exceptions"; }
   }
@@ -173,7 +176,16 @@ function renderRun() {
   const pb = tk.playback || { speed: 1, depth: 1 };
   $("#nowAdj").textContent = pb.speed !== 1 || pb.depth !== 1 ? `Adjusted: speed ${pct(pb.speed)}, depth ${pct(pb.depth)}` : "";
 }
-$$("[data-cmd]").forEach((b) => b.addEventListener("click", () => send(b.dataset.cmd)));
+$$("[data-cmd]").forEach((b) => b.addEventListener("click", async () => {
+  if (b.dataset.cmd === "play" && !P.tick?.armed) {
+    // the show only drives the motors while ENABLED (Motor Setup and Stop All disable them)
+    const v = await modal("The motors are DISABLED, so the show would only play on screen.",
+      [{ label: "Cancel", value: null }, { label: "Preview on screen", value: "preview" }, { label: "Enable & Run", value: "run", cls: "primary" }]);
+    if (!v) return;
+    if (v === "run") send("arm", { on: true });
+  }
+  send(b.dataset.cmd);
+}));
 
 function fitCanvas(cv) {
   const dpr = window.devicePixelRatio || 1;
@@ -192,7 +204,7 @@ function drawGauges() {
   const y = (mm) => T + (mm / travelMax) * (H - T - B);
   for (let i = 0; i < n; i++) {
     const m = P.config.motors[i], cx = colW * (i + 0.5), travel = travelOf(i);
-    const out = tk?.out_mm?.[i] ?? 0, act = tk?.actual_mm?.[i], lim = tk?.limited?.[i], fault = nodeFault(nodeFor(i));
+    const out = tk?.out_mm?.[i] ?? 0, act = tk?.actual_mm?.[i], lim = tk?.limited?.[i], fault = slotFault(i);
     ctx.fillStyle = "#eef0f2"; ctx.fillRect(cx - bw / 2, y(0), bw, y(travel) - y(0));
     ctx.fillStyle = "#4a525b"; ctx.fillRect(cx - bw / 2, y(0), bw, Math.max(0, y(out) - y(0)));
     ctx.strokeStyle = fault ? "#c62828" : lim ? "#d18a00" : "#c9cdd2"; ctx.lineWidth = fault || lim ? 3 : 1;
@@ -232,15 +244,16 @@ function renderAxes() {
         <div class="card-fault" style="color:var(--ink-3)">Set up a new PD Stepper as M${P.config.motors.length + 1}</div></button>` : "");
   }
   $$("#axisCards .card[data-axis]").forEach((card) => {
-    const i = +card.dataset.axis, nd = nodeFor(i), fault = nodeFault(nd), f = nd?.flags || [];
+    const i = +card.dataset.axis, nd = nodeFor(i), empty = isEmptySlot(i), fault = slotFault(i), f = nd?.flags || [];
     card.classList.toggle("sel", i === P.selAxis);
     card.classList.toggle("fault", !!fault);
     card.querySelector('[data-f="pos"]').textContent = nd && (f.includes("homed") || !memoryMode()) ? nd.pos_mm.toFixed(1) : "—";
     const leds = card.querySelectorAll(".card-leds .led");
-    leds[0].className = "led " + (nd?.online ? "on" : "bad");
+    leds[0].className = "led " + (nd?.online ? "on" : empty ? "" : "bad");
     leds[1].className = "led " + (f.includes("homing") ? "warn" : f.includes("homed") ? "on" : "");
     leds[2].className = "led " + (f.includes("enabled") ? "on" : "");
-    card.querySelector('[data-f="fault"]').textContent = fault;
+    card.querySelector('[data-f="fault"]').textContent = empty ? "Empty position: tap Motor Setup to add its board" : fault;
+    card.classList.toggle("empty", empty);
     card.querySelector('[data-f="meta"]').textContent = nd
       ? `${nd.vbus.toFixed(1)} V · enc Δ ${nd.err_mm === null ? "—" : nd.err_mm.toFixed(1) + " mm"} · ${nd.rssi} dBm` : "";
   });
@@ -379,6 +392,7 @@ $("#startToggles").addEventListener("click", async (ev) => {
 // ------------------------------------------------------------ system view
 function renderSystem() {
   const h = P.host || {}, tk = P.tick;
+  if ($("#motorCount")) $("#motorCount").textContent = nAxes();
   $$(".sim-only").forEach((b) => (b.hidden = !P.simulate));
   const homeBtn = $('[data-sys="home"]');
   if (homeBtn) homeBtn.textContent = memoryMode() ? "All Axes To Top" : "Home All Axes";
@@ -390,6 +404,17 @@ function renderSystem() {
     <dt>Axes</dt><dd>${nAxes()} configured</dd>`;
 }
 $("#v-system").addEventListener("click", async (ev) => {
+  const cnt = ev.target.closest("[data-count]");
+  if (cnt) {
+    const n = nAxes(), d = +cnt.dataset.count;
+    if (d < 0) {
+      if (n <= 1) { toast("Keep at least one motor", true); return; }
+      const last = n - 1, busy = P.tick?.commissioned?.[last] || (P.tick?.nodes || []).some((nd) => nd.online && nd.id === last);
+      if (busy && !(await confirmBox(`${P.config.motors[last].name} is set up or has a board. Remove it?`, "Remove", true))) return;
+    }
+    send("set_motor_count", { n: n + d, force: true });
+    return;
+  }
   const b = ev.target.closest("[data-sys]"); if (!b) return;
   const a = b.dataset.sys;
   if (a === "setup") { location.href = setupUrl({}); return; }

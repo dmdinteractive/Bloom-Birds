@@ -53,6 +53,7 @@ async function loadState() {
   $('[data-all="set_zero"]').hidden = mem;          // in memory mode the top is taught in Motor Setup
   $('[data-all="home"]').textContent = mem ? "All To Top" : "Home All";
   S.layoutMotors = JSON.parse(JSON.stringify(S.config.motors));
+  $("#motorCount").textContent = S.config.motors.length;
   if (!S.selClip || !clipById(S.selClip)) S.selClip = S.show.clips[0]?.id ?? null;
   S.selKey = null;
   if (S.highlight >= nMotors()) S.highlight = -1;
@@ -643,7 +644,13 @@ function renderStatus() {
   updateSoloHint();
 }
 
-$("#btnPlay").onclick = () => send("play");
+$("#btnPlay").onclick = () => {
+  // The show only drives the motors while ENABLED. After Motor Setup (or Stop All) it's disabled,
+  // and Run Show alone would just preview on screen.
+  if (!S.tick?.armed && confirm("The motors are DISABLED, so the show would only play on screen.\n\n" +
+      "OK: enable the motors and run the show.\nCancel: preview on screen only.")) send("arm", { on: true });
+  send("play");
+};
 $("#btnNext").onclick = () => send("next");
 $("#btnHold").onclick = () => send("hold");
 $("#btnPark").onclick = () => send("park");
@@ -722,8 +729,8 @@ function renderNodes() {
       </div></td></tr>`;
   }).join("") || `<tr><td colspan="12" class="sub">No axis nodes detected. Check the bridge connection and node power.</td></tr>`;
   const missing = S.config.motors.map((m, i) => i).filter((i) => !S.tick.nodes.some((nd) => nd.online && nd.id === i));
-  if (missing.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="12" class="sub">Not detected: ${missing.map((i) =>
-    `${esc(S.config.motors[i].name)} <button class="btn small" data-node="remove" data-id="${i}" title="Remove ${esc(S.config.motors[i].name)}">Remove</button>`).join(" &nbsp; ")}</td></tr>`);
+  if (missing.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="12" class="sub">Empty or not detected: ${missing.map((i) =>
+    `${esc(S.config.motors[i].name)} <button class="btn small" data-node="setup_slot" data-id="${i}" title="Set up the board for ${esc(S.config.motors[i].name)}">Setup…</button><button class="btn small" data-node="remove" data-id="${i}" title="Remove ${esc(S.config.motors[i].name)}">Remove</button>`).join(" &nbsp; ")}</td></tr>`);
 }
 $("#nodeRows").addEventListener("click", (ev) => {
   const b = ev.target.closest("button[data-node]"); if (!b) return;
@@ -739,6 +746,7 @@ $("#nodeRows").addEventListener("click", (ev) => {
     return;
   }
   if (a === "identify") send("identify", { mac: b.dataset.mac });
+  else if (a === "setup_slot") location.href = `/setup?from=editor&motor=${id}`;
   else if (a === "setup") location.href = `/setup?from=editor&mac=${encodeURIComponent(b.dataset.mac)}${id !== undefined ? `&motor=${id}` : ""}`;
   else if (a === "jog") send("jog", { id, mm: +b.dataset.mm });
   else if (a === "enable") send("enable", { id, on: b.dataset.on === "1" });
@@ -755,6 +763,14 @@ $$("[data-all]").forEach((b) => b.addEventListener("click", () => {
   else if (a === "autostart") send(a);
   else if (a === "setup") location.href = "/setup?from=editor";
   else if (a === "add_motor") location.href = "/setup?from=editor&new=1";
+  else if (a === "count_inc") { send("set_motor_count", { n: S.config.motors.length + 1 }); }
+  else if (a === "count_dec") {
+    const n = S.config.motors.length, last = n - 1, m = S.config.motors[last];
+    if (n <= 1) { toast("Keep at least one motor", true); return; }
+    const busy = S.tick?.commissioned?.[last] || (S.tick?.nodes || []).some((nd) => nd.online && nd.id === last);
+    if (busy && !confirm(`${m.name} is set up or has a board. Remove it?`)) return;
+    send("set_motor_count", { n: n - 1, force: true });
+  }
   else if (a === "remove_unused") {
     if (confirm("Remove every motor that hasn't been set up and has no board reporting?")) { send("remove_unused"); setTimeout(loadState, 600); }
   }

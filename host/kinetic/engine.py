@@ -511,7 +511,8 @@ class Engine:
             await asyncio.sleep(0.5)
         self.event(f"Bridge connected ({self.tx.port_name})")
         self.startup = "waiting for motors"
-        want = set(range(cfg.motor_count))
+        # wait for the motors that have been set up; empty positions (no board yet) don't hold things up
+        want = {i for i, m in enumerate(cfg.motors) if m.get("commissioned")} or set(range(cfg.motor_count))
         t0 = time.monotonic()
         while time.monotonic() - t0 < 15:
             have = {n["status"].id for n in self.online_nodes()}
@@ -563,8 +564,8 @@ class Engine:
             await asyncio.sleep(0.5)
 
         homed = [i for i in range(cfg.motor_count) if (s := self.node_by_id(i)) and s["status"].has("homed")]
-        if len(homed) < cfg.motor_count:
-            self.event(f"Only {len(homed)}/{cfg.motor_count} motors are homed; the rest will not move", "warn")
+        if len(homed) < len(want):
+            self.event(f"Only {len(homed)}/{len(want)} set-up motors know their position; the rest will not move", "warn")
         if cfg.data.get("autoplay", True) and homed:
             self.startup = "running"
             self.arm(True)
@@ -634,6 +635,22 @@ class Engine:
         removed = ", ".join(names[i] for i in sorted(ids))
         moved = sum(1 for o, m in zip(old_ids, self.cfg.motors) if o != m["id"])
         self.event(f"Removed {removed}" + (f"; {moved} motor(s) after it were renumbered" if moved else ""))
+
+    def set_motor_count(self, n: int, force: bool = False):
+        """Grow by adding empty slots at the end, or shrink by removing from the end.
+        Removing a motor that is set up or has a board reporting needs force=True."""
+        n = max(1, min(P.MAX_MOTORS, int(n)))
+        cur = self.cfg.motor_count
+        if n > cur:
+            for _ in range(n - cur):
+                self.add_motor()
+        elif n < cur:
+            drop = list(range(n, cur))
+            seen = {nd["status"].id for nd in self.online_nodes()}
+            busy = [self.cfg.motors[i]["name"] for i in drop if self.cfg.motors[i].get("commissioned") or i in seen]
+            if busy and not force:
+                raise ValueError(f"{', '.join(busy)} is set up or has a board; confirm to remove")
+            self.remove_motors(drop)
 
     def remove_unused(self):
         """Remove every motor that hasn't been through Motor Setup and has no board reporting."""

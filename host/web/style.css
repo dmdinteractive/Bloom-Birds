@@ -206,3 +206,7 @@ input[type=range] { width: 100%; accent-color: #4a525b; height: 16px; margin: 0;
   .tb-readouts { margin-left: 0; }
   #layoutCanvas { width: 100%; height: auto; aspect-ratio: 1; }
 }
+
+/* motor count stepper in the Axes toolbar */
+.count-ctl { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--line-2, #c9cdd2); border-radius: 2px; height: 26px; }
+.count-ctl b { font-family: Consolas, Menlo, monospace; min-width: 18px; text-align: center; }
