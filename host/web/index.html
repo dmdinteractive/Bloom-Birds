@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kinetic Motion Control</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+
+<!-- ================= title bar ================= -->
+<header class="titlebar">
+  <div class="title"><span class="appmark" aria-hidden="true"></span>Kinetic Motion Control <span class="sep">—</span> <span id="showName"></span></div>
+  <div class="indicators" id="indicators"></div>
+</header>
+
+<!-- ================= toolbar ================= -->
+<div class="toolbar" role="toolbar" aria-label="Transport">
+  <div class="tb-group">
+    <button class="tbtn" id="btnPlay" title="Run the playlist from the start"><span class="gl">▶</span>Run Show</button>
+    <button class="tbtn" id="btnNext" title="Skip to the next playlist entry"><span class="gl">▶|</span>Next</button>
+    <button class="tbtn" id="btnHold" title="Freeze all axes at their current position"><span class="gl">||</span>Hold</button>
+    <button class="tbtn" id="btnPark" title="Wind every axis up to home"><span class="gl">↑</span>Park</button>
+  </div>
+  <div class="tb-sep"></div>
+  <div class="tb-group">
+    <button class="tbtn stop" id="btnStopAll" title="Decelerate every axis to a stop and disable streaming"><span class="gl">■</span>Stop All</button>
+  </div>
+  <div class="tb-readouts">
+    <div class="ro"><span class="ro-l">Mode</span><span class="ro-v" id="roMode">—</span></div>
+    <div class="ro wide"><span class="ro-l">Clip</span><span class="ro-v" id="roClip">—</span></div>
+    <div class="ro"><span class="ro-l">Time</span><span class="ro-v" id="roTime">—</span></div>
+  </div>
+  <button class="enable" id="btnEnable" aria-pressed="false" title="When enabled, the axes follow the show. Disabled = preview on screen only.">
+    <span class="led" id="enableLed"></span><span id="enableText">DISABLED</span>
+  </button>
+</div>
+
+<!-- ================= tabs ================= -->
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="design" role="tab">Motion Design</button>
+  <button class="tab" data-tab="motors" role="tab">Axes</button>
+  <button class="tab" data-tab="settings" role="tab">Setup</button>
+</nav>
+
+<main>
+  <!-- ============ DESIGN ============ -->
+  <section class="view active" id="view-design">
+    <div class="col-left">
+      <fieldset class="group">
+        <legend>Show</legend>
+        <div class="row gap">
+          <select id="showSelect" class="grow" aria-label="Active show"></select>
+          <button class="btn" id="btnSaveAs">Save As…</button>
+        </div>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Playlist <span class="legend-note" id="playlistTotal"></span></legend>
+        <div class="list-head pl-cols"><span>#</span><span>Clip</span><span>Rep</span><span>Length</span><span></span></div>
+        <ol class="list" id="playlist"></ol>
+        <p class="note">Runs top to bottom and loops. Each clip crossfades in over its fade time.</p>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Clip Library</legend>
+        <div class="row gap mb">
+          <button class="btn" id="btnAddPattern">New Pattern</button>
+          <button class="btn" id="btnAddTimeline">New Timeline</button>
+        </div>
+        <div class="list-head cl-cols"><span>Name</span><span>Type</span><span>Length</span></div>
+        <ul class="list" id="clipList"></ul>
+      </fieldset>
+    </div>
+
+    <div class="col-center">
+      <fieldset class="group">
+        <legend>Axis Monitor</legend>
+        <canvas id="stage" aria-label="Commanded and reported position of every axis"></canvas>
+        <div class="key">
+          <span><i class="k-cmd"></i>Commanded</span>
+          <span><i class="k-act"></i>Reported by motor</span>
+          <span><i class="k-lim"></i>Rate-limited</span>
+        </div>
+      </fieldset>
+      <fieldset class="group">
+        <legend id="scoreTitle">Motion Profile</legend>
+        <div class="row gap scope-bar">
+          <span class="note" id="scoreHint"></span>
+          <label class="inline">Highlight <select id="traceSel" aria-label="Highlight one axis"></select></label>
+        </div>
+        <div class="alert" id="limitWarning" hidden></div>
+        <canvas id="score" tabindex="0" aria-label="Motion profile of the selected clip"></canvas>
+      </fieldset>
+    </div>
+
+    <div class="col-right">
+      <fieldset class="group editor-group">
+        <legend id="editorTitle">Clip Properties</legend>
+        <div id="editor"></div>
+      </fieldset>
+    </div>
+  </section>
+
+  <!-- ============ AXES ============ -->
+  <section class="view" id="view-motors">
+    <fieldset class="group">
+      <legend>Axis Nodes</legend>
+      <div class="row gap wrap mb">
+        <button class="btn" data-all="home">Home All</button>
+        <button class="btn" data-all="set_zero" title="Use each axis' current position as home">Zero All</button>
+        <button class="btn" data-all="push_config">Send Settings</button>
+        <button class="btn" data-all="enable_off">Release All</button>
+        <button class="btn" data-all="autostart" title="Find, configure, home, then run the show">Run Startup Sequence</button>
+        <button class="btn default" data-all="setup" title="Introduce a new or replaced PD Stepper: direction, encoder, top and bottom">Motor Setup…</button>
+        <button class="btn sim-only" data-all="sim_cut" hidden>Sim: Power Cut</button>
+        <button class="btn sim-only" data-all="sim_cut_fail" hidden>Sim: Power Cut, Save Fails</button>
+      </div>
+      <div class="table-wrap">
+        <table class="grid-table">
+          <thead><tr>
+            <th>Axis</th><th>Node</th><th class="c">Link</th><th class="c">En</th><th class="c">Homed</th><th class="c">Limit</th><th class="c">Fault</th>
+            <th class="r">Supply</th><th class="r">Position</th><th class="r">Enc Δ</th><th class="r">RSSI</th><th>Commands</th>
+          </tr></thead>
+          <tbody id="nodeRows"></tbody>
+        </table>
+      </div>
+      <p class="note">Unassigned nodes appear highlighted. Use <b>Setup…</b> to introduce a new board: it sets direction, checks the encoder and teaches the top and bottom. Jog is available only while disabled.</p>
+    </fieldset>
+    <fieldset class="group">
+      <legend>Event Log</legend>
+      <div class="table-wrap log-wrap">
+        <table class="grid-table log"><thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead><tbody id="events"></tbody></table>
+      </div>
+    </fieldset>
+  </section>
+
+  <!-- ============ SETUP ============ -->
+  <section class="view" id="view-settings">
+    <div class="setup-grid">
+      <fieldset class="group">
+        <legend>Mechanics <span class="legend-note" id="spmInfo"></span></legend>
+        <div id="mechForm" class="prop-grid"></div>
+        <div class="row gap end"><button class="btn default" id="btnSaveMech">Apply &amp; Send to Axes</button></div>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Startup</legend>
+        <div id="startForm" class="prop-grid"></div>
+        <div class="row gap end"><button class="btn default" id="btnSaveStart">Apply</button></div>
+      </fieldset>
+      <fieldset class="group span2">
+        <legend>Axis Layout</legend>
+        <div class="row gap wrap mb">
+          <label class="inline">Axes <input type="number" id="presetCount" min="1" max="16" value="8" class="num-sm"></label>
+          <label class="inline">Arrangement <select id="presetKind"><option value="line">Line</option><option value="grid">Grid</option><option value="circle">Circle</option></select></label>
+          <button class="btn" id="btnPreset">Generate</button>
+        </div>
+        <div class="layout-wrap">
+          <canvas id="layoutCanvas" aria-label="Top view of axis positions; drag to move"></canvas>
+          <div class="table-wrap">
+            <table class="grid-table layout-table">
+              <thead><tr><th>#</th><th>Name</th><th>X</th><th>Y</th><th>Trim (mm)</th><th>Travel (mm)</th></tr></thead>
+              <tbody id="layoutRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <p class="note">X/Y are plan-view positions (0–1) used by wave, ripple and spin patterns. Trim offsets one axis' height; Travel overrides the default for one axis.</p>
+        <div class="row gap end"><button class="btn default" id="btnSaveLayout">Apply Layout</button></div>
+      </fieldset>
+    </div>
+  </section>
+</main>
+
+<!-- ================= status bar ================= -->
+<footer class="statusbar">
+  <div class="sb-cell" id="sbState">Ready</div>
+  <div class="sb-cell" id="sbPort">Bridge: —</div>
+  <div class="sb-cell" id="sbRate">—</div>
+  <div class="sb-cell" id="sbTx">—</div>
+  <div class="sb-cell sb-exception" id="sbException" title="Most recent warning">No exceptions</div>
+</footer>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

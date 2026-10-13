@@ -1,0 +1,15 @@
+[Unit]
+Description=Kinetic sculpture controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python3 __DIR__/run.py --port 8080
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Kinetic Operator Panel</title>
+<link rel="stylesheet" href="/static/panel.css">
+</head>
+<body>
+<div class="panel-app">
+
+  <header class="top">
+    <div class="brand"><span class="appmark" aria-hidden="true"></span><span>Kinetic <b>Operator</b></span></div>
+    <div class="lights" id="lights"></div>
+    <button class="big stop" id="btnStop"><span class="sq"></span>STOP ALL</button>
+    <button class="big enable" id="btnEnable" aria-pressed="false"><span class="led" id="enLed"></span><span id="enText">DISABLED</span></button>
+  </header>
+
+  <nav class="side" role="tablist">
+    <button class="nav active" data-view="run">Run</button>
+    <button class="nav" data-view="axes">Axes</button>
+    <button class="nav" data-view="playlist">Playlist</button>
+    <button class="nav" data-view="adjust">Adjust</button>
+    <button class="nav" data-view="system">System</button>
+  </nav>
+
+  <main class="content">
+    <!-- RUN -->
+    <section class="view active" id="v-run">
+      <div class="run-grid">
+        <div class="box now">
+          <div class="box-h">Now Playing</div>
+          <div class="now-mode" id="nowMode">—</div>
+          <div class="now-clip" id="nowClip">—</div>
+          <div class="bar"><div class="bar-fill" id="nowBar"></div></div>
+          <div class="now-meta"><span id="nowTime">—</span><span id="nowNext"></span></div>
+          <div class="now-adj" id="nowAdj"></div>
+        </div>
+        <div class="box ctl">
+          <div class="box-h">Show Control</div>
+          <div class="btn-grid">
+            <button class="big" data-cmd="play"><span class="gl">▶</span>Run Show</button>
+            <button class="big" data-cmd="next"><span class="gl">▶|</span>Next Clip</button>
+            <button class="big" data-cmd="hold"><span class="gl">||</span>Hold</button>
+            <button class="big" data-cmd="park"><span class="gl">↑</span>Park (wind up)</button>
+          </div>
+        </div>
+        <div class="box gauges">
+          <div class="box-h">Axis Positions <span class="h-note">cable paid out, mm</span></div>
+          <canvas id="gauges" aria-label="Position of every axis"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- AXES -->
+    <section class="view" id="v-axes">
+      <div class="axes-wrap">
+        <div class="axis-cards" id="axisCards"></div>
+        <div class="box axis-actions" id="axisActions"></div>
+      </div>
+    </section>
+
+    <!-- PLAYLIST -->
+    <section class="view" id="v-playlist">
+      <div class="box fill">
+        <div class="box-h">Playlist <span class="h-note" id="plTotal"></span></div>
+        <div class="pl-head"><span>On</span><span>#</span><span>Clip</span><span>Repeat</span><span>Order</span><span></span></div>
+        <div class="pl-rows" id="plRows"></div>
+        <p class="hint">Switched-off clips are skipped. Changes save immediately and take effect at the next clip change.</p>
+      </div>
+    </section>
+
+    <!-- ADJUST -->
+    <section class="view" id="v-adjust">
+      <div class="adjust-grid">
+        <div class="box">
+          <div class="box-h">Show Speed</div>
+          <div class="stepper big-step">
+            <button class="big" data-step="speed" data-d="-0.05" aria-label="Slower">−</button>
+            <div class="step-val" id="speedVal">100%</div>
+            <button class="big" data-step="speed" data-d="0.05" aria-label="Faster">+</button>
+          </div>
+          <div class="presets" data-preset="speed">
+            <button class="mid" data-v="0.5">50%</button><button class="mid" data-v="0.75">75%</button>
+            <button class="mid" data-v="1">100%</button><button class="mid" data-v="1.25">125%</button>
+          </div>
+          <p class="hint">Plays every clip slower or faster. Above 100% the motors may reach their speed limit and lag behind smoothly.</p>
+        </div>
+        <div class="box">
+          <div class="box-h">Depth Limit</div>
+          <div class="stepper big-step">
+            <button class="big" data-step="depth" data-d="-0.05" aria-label="Shallower">−</button>
+            <div class="step-val" id="depthVal">100%</div>
+            <button class="big" data-step="depth" data-d="0.05" aria-label="Deeper">+</button>
+          </div>
+          <div class="presets" data-preset="depth">
+            <button class="mid" data-v="0.5">50%</button><button class="mid" data-v="0.7">70%</button>
+            <button class="mid" data-v="0.85">85%</button><button class="mid" data-v="1">100%</button>
+          </div>
+          <p class="hint">Scales how far the cables drop. 100% plays the show as designed; lower keeps everything closer to the top.</p>
+        </div>
+        <div class="box">
+          <div class="box-h">Power-Up</div>
+          <div class="toggles" id="startToggles"></div>
+          <button class="mid wide" id="btnReset">Reset Speed &amp; Depth to 100%</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SYSTEM -->
+    <section class="view" id="v-system">
+      <div class="system-grid">
+        <div class="box">
+          <div class="box-h">Controller</div>
+          <div class="kv" id="sysInfo"></div>
+          <div class="btn-col">
+            <button class="mid" data-sys="autostart">Run Startup Sequence</button>
+            <button class="mid" data-sys="home">Home All Axes</button>
+            <button class="mid" data-sys="push_config">Resend Axis Settings</button>
+            <button class="mid" data-sys="setup">Motor Setup…</button>
+            <button class="mid sim-only" data-sys="sim_cut" hidden>Sim: power cut</button>
+            <button class="mid sim-only" data-sys="sim_cut_fail" hidden>Sim: power cut, save fails</button>
+          </div>
+        </div>
+        <div class="box fill">
+          <div class="box-h">Event Log</div>
+          <div class="log" id="log"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="status">
+    <span id="stState">Connecting…</span>
+    <span id="stException" class="exc">No exceptions</span>
+  </footer>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalMsg">
+    <div class="modal-msg" id="modalMsg"></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-btns" id="modalBtns"></div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/static/panel.js"></script>
+</body>
+</html>

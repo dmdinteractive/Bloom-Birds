@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Kinetic Motor Setup</title>
+<link rel="stylesheet" href="/static/panel.css">
+<link rel="stylesheet" href="/static/commission.css">
+</head>
+<body>
+<div class="setup-app">
+
+  <header class="top">
+    <div class="brand"><span class="appmark" aria-hidden="true"></span><span>Kinetic <b>Motor Setup</b></span></div>
+    <div class="lights" id="lights"></div>
+    <button class="big stop" id="btnStop"><span class="sq"></span>STOP</button>
+    <button class="big" id="btnExit">Exit Setup</button>
+  </header>
+
+  <nav class="steps" id="steps" aria-label="Setup steps"></nav>
+
+  <main class="stage">
+    <section class="box step-box" id="stepBox"></section>
+  </main>
+
+  <aside class="readout box" id="readout"></aside>
+
+  <footer class="status-strip"><span id="statusLeft">Connecting…</span><span id="statusRight"></span></footer>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-msg" id="modalMsg"></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-btns" id="modalBtns"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script src="/static/commission.js"></script>
+</body>
+</html>

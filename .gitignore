@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+host/.venv-mac/
+host/.venv/
+
+# Settings and state created when the controller runs (each machine keeps its own)
+host/config.json
+host/config-sim.json
+host/config-sim-nodes.json
+*.tmp
+*.corrupt
+
+# macOS
+.DS_Store
