@@ -2,8 +2,9 @@
 speed/acceleration limiter.
 
 Conventions
-  * A "drop" value is 0..1 for each motor: 0 = fully wound in (home, top),
-    1 = fully paid out (bottom of that motor's travel).
+  * A design value is 0..1 for each motor: 0 = home (top of a spool, home end of a slide,
+    start angle of an arm), 1 = the far end of that motor's taught travel. For a
+    continuous-rotation motor the value is a speed (see config.speed_from_norm).
   * Motors have layout coordinates x, y in 0..1 (config.json), which spatial
     patterns (wave, ripple, spin...) use.
   * Everything here is pure functions/classes so it can be unit-tested and
@@ -58,9 +59,9 @@ def _normalize(vals: list[float]) -> list[float]:
 
 COMMON_PARAMS = [
     {"key": "center", "label": "Center height", "min": 0, "max": 1, "step": 0.01, "default": 0.5,
-     "help": "Middle of the motion (0 = top, 1 = bottom)"},
+     "help": "Middle of the motion (0 = home, 1 = far end; continuous rotation: speed)"},
     {"key": "amplitude", "label": "Amplitude", "min": 0, "max": 0.5, "step": 0.01, "default": 0.3,
-     "help": "How far above/below the center each motor travels"},
+     "help": "How far each motor swings either side of the center"},
     {"key": "period", "label": "Period (s)", "min": 1, "max": 120, "step": 0.5, "default": 12,
      "help": "Seconds for one full cycle"},
     {"key": "dwell", "label": "Dwell", "min": 0, "max": 0.8, "step": 0.01, "default": 0.0,
@@ -284,7 +285,8 @@ class Limiter:
     and `limited[i]` is set so the editor can warn you.
     """
 
-    def __init__(self, n: int, vmax: float, amax: float, tolerance: float = 3.0):
+    def __init__(self, n: int, vmax, amax, tolerance: float = 3.0):
+        """vmax / amax: one number for every motor, or a list with one per motor."""
         self.n = n
         self.vmax = vmax
         self.amax = amax
@@ -293,6 +295,7 @@ class Limiter:
         self.v = [0.0] * n
         self.prev_desired: list[float] | None = None
         self.limited = [False] * n
+        self.tol_relative = False
 
     def reset(self, positions: list[float]):
         self.x = list(positions)
@@ -302,32 +305,38 @@ class Limiter:
     def step(self, desired: list[float], dt: float, lo: list[float], hi: list[float]) -> tuple[list[float], list[float]]:
         if self.prev_desired is None:
             self.prev_desired = list(desired)
+        vmaxs = self.vmax if isinstance(self.vmax, (list, tuple)) else [self.vmax] * self.n
+        amaxs = self.amax if isinstance(self.amax, (list, tuple)) else [self.amax] * self.n
         for i in range(self.n):
+            vmax, amax = vmaxs[i], amaxs[i]
             d = min(max(desired[i], lo[i]), hi[i])
             ff = (d - min(max(self.prev_desired[i], lo[i]), hi[i])) / dt
             err = d - self.x[i]
             # close the error as fast as possible while always leaving room to brake
-            ve = math.copysign(min(math.sqrt(1.8 * self.amax * abs(err)), abs(err) / dt), err)
-            vt = max(-self.vmax, min(self.vmax, ff + ve))
-            dv = max(-self.amax * dt, min(self.amax * dt, vt - self.v[i]))
+            ve = math.copysign(min(math.sqrt(1.8 * amax * abs(err)), abs(err) / dt), err)
+            vt = max(-vmax, min(vmax, ff + ve))
+            dv = max(-amax * dt, min(amax * dt, vt - self.v[i]))
             self.v[i] += dv
             self.x[i] += self.v[i] * dt
             self.x[i] = min(max(self.x[i], lo[i]), hi[i])
             if self.x[i] in (lo[i], hi[i]) and ((self.x[i] == lo[i] and self.v[i] < 0) or (self.x[i] == hi[i] and self.v[i] > 0)):
                 self.v[i] = 0.0
-            self.limited[i] = abs(d - self.x[i]) > self.tol
+            # "limited" = more than ~1% of the range (min tolerance) behind the design
+            self.limited[i] = abs(d - self.x[i]) > max(self.tol * 0.01 * max(hi[i] - lo[i], 1e-9), 1e-6) \
+                if self.tol_relative else abs(d - self.x[i]) > self.tol
         self.prev_desired = list(desired)
         return list(self.x), list(self.v)
 
 
-def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax: float, amax: float,
+def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax, amax,
                 samples_per_s: float = 10.0, max_samples: int = 1200) -> dict:
     """Sample a clip for the editor: desired drops plus where the limiter would kick in."""
     dur = max(0.5, float(clip.get("duration", 30)))
     n_samples = int(min(max_samples, max(20, dur * samples_per_s)))
     dt = dur / n_samples
     sim_dt = 1 / 50
-    lim = Limiter(len(motors), vmax, amax)
+    lim = Limiter(len(motors), vmax, amax, tolerance=0.5)
+    lim.tol_relative = True
     first = eval_clip(clip, 0.0, motors)
     lim.reset([f * tr for f, tr in zip(first, travel)])
     zeros = [0.0] * len(motors)

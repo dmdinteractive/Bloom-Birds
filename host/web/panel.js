@@ -102,11 +102,13 @@ function nodeFault(nd) {
     const setupMac = P.tick?.setup_macs?.[nd.id];
     if (P.tick?.commissioned?.[nd.id] && setupMac && setupMac !== nd.mac) return "Different board than was set up: run Motor Setup";
     if (!f.includes("calibrated")) return "Not set up: Motor Setup";
-    if (!f.includes("homed")) return "Position unknown: Motor Setup > Find top";
+    if (!f.includes("homed") && P.tick?.kinds?.[nd.id] !== "continuous") return "Position unknown: Motor Setup > Find home";
   }
   return "";
 }
 const memoryMode = () => (P.tick?.home_mode || P.config?.mechanics.home_mode) === "memory";
+const unitOf = (i) => P.tick?.units?.[i] || "mm";
+const JOG_STEPS = { spool: [50, 10], linear: [20, 5], rotary: [45, 10], continuous: [1, 0.25] };
 const travelOf = (i) => P.tick?.travel?.[i] ?? (P.config.motors[i].travel_mm || P.config.mechanics.travel_mm);
 const setupUrl = (q) => `/setup?from=panel&${new URLSearchParams(q)}`;
 // A position that has never been set up and has no board yet is "empty", not a fault.
@@ -200,9 +202,12 @@ function drawGauges() {
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
   const tk = P.tick, n = nAxes();
   const T = 10, B = 44, colW = W / n, bw = Math.min(46, colW * 0.42);
+  // same units everywhere: one scale. Mixed mechanisms: each bar is its own travel (0-100%).
+  const units = P.config.motors.map((m, i) => unitOf(i)), uniform = units.every((u) => u === units[0]);
   const travelMax = Math.max(...P.config.motors.map((m, i) => travelOf(i)));
-  const y = (mm) => T + (mm / travelMax) * (H - T - B);
   for (let i = 0; i < n; i++) {
+    const scale = uniform ? travelMax : travelOf(i) || 1;
+    const y = (v) => T + (Math.abs(v) / scale) * (H - T - B);
     const m = P.config.motors[i], cx = colW * (i + 0.5), travel = travelOf(i);
     const out = tk?.out_mm?.[i] ?? 0, act = tk?.actual_mm?.[i], lim = tk?.limited?.[i], fault = slotFault(i);
     ctx.fillStyle = "#eef0f2"; ctx.fillRect(cx - bw / 2, y(0), bw, y(travel) - y(0));
@@ -216,7 +221,8 @@ function drawGauges() {
     ctx.textAlign = "center"; ctx.fillStyle = "#1b1f23"; ctx.font = "600 14px 'Segoe UI', Roboto, Arial, sans-serif";
     ctx.fillText(m.name, cx, H - 24);
     ctx.font = "13px Consolas, Menlo, 'DejaVu Sans Mono', monospace"; ctx.fillStyle = "#4a525b";
-    ctx.fillText(`${Math.round(act ?? out)}`, cx, H - 7);
+    const v = act ?? out, u = units[i];
+    ctx.fillText(u === "rev/s" ? `${v.toFixed(2)} rev/s` : `${Math.round(v)}${u === "°" ? "°" : ""}`, cx, H - 7);
   }
 }
 
@@ -225,13 +231,13 @@ function renderAxes() {
   if (!P.tick) return;
   const nodes = P.tick.nodes;
   const unassigned = nodes.filter((nd) => nd.online && nd.id === null);
-  const key = P.config.motors.map((m) => m.name).join("|") + "#" + unassigned.map((n) => n.mac).join(",");
+  const key = P.config.motors.map((m, i) => m.name + unitOf(i)).join("|") + "#" + unassigned.map((n) => n.mac).join(",");
   const wrap = $("#axisCards");
   if (key !== P.cardsKey) {
     P.cardsKey = key;
     wrap.innerHTML = P.config.motors.map((m, i) => `<button class="card" data-axis="${i}">
         <div class="card-top"><span class="card-name">${esc(m.name)}</span><span class="card-id">#${i}</span></div>
-        <div class="card-pos"><span data-f="pos">—</span> <small>mm</small></div>
+        <div class="card-pos"><span data-f="pos">—</span> <small>${esc(unitOf(i))}</small></div>
         <div class="card-leds"><span>${led()}Link</span><span>${led()}${memoryMode() ? "Located" : "Homed"}</span><span>${led()}En</span></div>
         <div class="card-meta" data-f="meta"></div>
         <div class="card-fault" data-f="fault"></div></button>`).join("") +
@@ -262,7 +268,7 @@ function renderAxes() {
 function renderAxisActions() {
   const i = P.selAxis, m = P.config.motors[i], nd = nodeFor(i), armed = !!P.tick?.armed;
   const mem = memoryMode();
-  const key = `${i}|${armed}|${!!nd}|${mem}`;
+  const key = `${i}|${armed}|${!!nd}|${mem}|${P.tick?.kinds?.[i]}`;
   if (key === P.actionsKey) return;
   P.actionsKey = key;
   const dis = armed ? "disabled" : "";
@@ -271,15 +277,16 @@ function renderAxisActions() {
     <button class="mid" data-act="identify" ${nd ? "" : "disabled"}>Identify</button>
     <button class="mid" data-act="home" ${nd ? "" : "disabled"}>${mem ? "To Top" : "Home"}</button>
     <span class="sep"></span>
-    <button class="mid" data-act="jog" data-mm="-50" ${dis}>▲ 50</button>
-    <button class="mid" data-act="jog" data-mm="-10" ${dis}>▲ 10</button>
-    <button class="mid" data-act="jog" data-mm="10" ${dis}>▼ 10</button>
-    <button class="mid" data-act="jog" data-mm="50" ${dis}>▼ 50</button>
+    ${(() => { const [a, b] = JOG_STEPS[P.tick?.kinds?.[i] || "spool"] || JOG_STEPS.spool;
+      return `<button class="mid" data-act="jog" data-mm="${-a}" ${dis}>▲ ${a}</button>
+    <button class="mid" data-act="jog" data-mm="${-b}" ${dis}>▲ ${b}</button>
+    <button class="mid" data-act="jog" data-mm="${b}" ${dis}>▼ ${b}</button>
+    <button class="mid" data-act="jog" data-mm="${a}" ${dis}>▼ ${a}</button>`; })()}
     <span class="sep"></span>
     ${mem ? "" : `<button class="mid" data-act="zero" ${dis}>Set Zero</button>`}
     <button class="mid" data-act="release" ${dis}>Release</button>
     <button class="mid" data-act="remove" ${P.config.motors.length <= 1 ? "disabled" : ""}>Remove</button>
-    ${armed ? `<span class="note">Disable axes to jog, zero or release.</span>` : `<span class="note">▲ winds in · ▼ pays out (mm)</span>`}`;
+    ${armed ? `<span class="note">Disable axes to jog, zero or release.</span>` : `<span class="note">▲ toward home · ▼ away (${esc(unitOf(i))})</span>`}`;
 }
 $("#axisCards").addEventListener("click", async (ev) => {
   const card = ev.target.closest(".card"); if (!card) return;
@@ -303,7 +310,7 @@ $("#axisActions").addEventListener("click", async (ev) => {
   switch (b.dataset.act) {
     case "identify": if (nd) send("identify", { mac: nd.mac }); break;
     case "setup": location.href = setupUrl(nd ? { motor: i, mac: nd.mac } : { motor: i }); break;
-    case "home": if (await confirmBox(memoryMode() ? `Move ${name} up to its taught top?` : `Home ${name}? It will wind in until it reaches its home switch.`, memoryMode() ? "To Top" : "Home")) send("home", { id: i }); break;
+    case "home": if (await confirmBox(memoryMode() ? `Move ${name} to its taught home position?` : `Home ${name}? It will wind in until it reaches its home switch.`, memoryMode() ? "To Top" : "Home")) send("home", { id: i }); break;
     case "jog": send("jog", { id: i, mm: +b.dataset.mm }); break;
     case "zero": if (await confirmBox(`Set ${name}'s current position as home (fully wound in)?`, "Set Zero")) send("set_zero", { id: i }); break;
     case "release": send("enable", { id: i, on: false }); toast(`${name} released`); break;
@@ -430,7 +437,7 @@ $("#v-system").addEventListener("click", async (ev) => {
     return;
   }
   const msg = { autostart: "Run the startup sequence? Axes will be found, configured, homed, then the show starts.",
-    home: memoryMode() ? "Move every axis up to its taught top? The show stops." : "Home every axis? The show stops and all cables wind in to their home switches.",
+    home: memoryMode() ? "Move every axis to its taught home position? The show stops." : "Home every axis? The show stops and all cables wind in to their home switches.",
     push_config: "Resend mechanics settings to every axis?" }[a];
   if (!(await confirmBox(msg, b.textContent))) return;
   send(a, a === "autostart" ? {} : { id: "all" });

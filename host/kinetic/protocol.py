@@ -8,13 +8,14 @@ import struct
 from dataclasses import dataclass
 
 MAGIC = b"KS"
-VERSION = 2
+VERSION = 3
 MAX_MOTORS = 16
 ID_UNASSIGNED = 0xFF
 TARGET_ALL = 0xFF
 
 T_FRAME, T_CMD, T_STATUS, T_BRIDGE = 1, 2, 3, 16
 FF_ENABLE = 0x01
+POS_VELOCITY = -(2**31)          # KsMotorTarget.pos sentinel: continuous rotation, run at vel
 
 C_ENABLE, C_HOME, C_SET_ZERO, C_JOG, C_STOP, C_IDENTIFY, C_SET_ID, C_CONFIG, C_REBOOT, C_SET_LIMITS, C_RESTORE = range(1, 12)
 CFG_COUNT = 12
@@ -68,7 +69,7 @@ def pack_frame(seq: int, flags: int, targets: list[tuple[int, int]]) -> bytes:
     if len(targets) > MAX_MOTORS:
         raise ValueError("too many motors")
     body = struct.pack("<HBB", seq & 0xFFFF, flags, len(targets))
-    body += b"".join(_TARGET.pack(_clamp32(p), _clamp32(v)) for p, v in targets)
+    body += b"".join(_TARGET.pack(p if p == POS_VELOCITY else _clamp32(p), _clamp32(v)) for p, v in targets)
     return header(T_FRAME) + body
 
 

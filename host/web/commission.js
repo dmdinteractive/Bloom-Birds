@@ -48,7 +48,10 @@ function modal(msg, buttons) {
 }
 
 // ------------------------------------------------------------ connection
-async function loadConfig() { C.config = (await api("GET", "/api/state")).config; }
+async function loadConfig() {
+  const st = await api("GET", "/api/state");
+  C.config = st.config; C.kinds = st.kinds; C.sizePresets = st.size_presets;
+}
 function connectWs() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   C.ws = ws;
@@ -62,40 +65,57 @@ function connectWs() {
 }
 
 // ------------------------------------------------------------ steps
-const FULL = [
-  ["choose", "Choose motor"], ["direction", "Direction"], ["encoder", "Encoder"],
-  ["top", "Teach top"], ["bottom", "Teach bottom"], ["test", "Test"], ["finish", "Save"],
-];
-const RECOVER = [["choose", "Choose motor"], ["top", "Find top"], ["finish", "Save"]];
-
-function stepsFor(w) { return w?.recover ? RECOVER : FULL; }
+// The step list comes from the controller (it depends on the mechanism: continuous rotation has
+// no ends to teach). Labels use each mechanism's own words: top/bottom, home/far end, start/end angle.
+const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
+function stepLabel(k, w) {
+  if (k === "choose") return "Choose motor";
+  if (k === "mechanism") return "Mechanism";
+  if (k === "direction") return "Direction";
+  if (k === "encoder") return "Encoder";
+  if (k === "top") return (w?.recover ? "Find " : "Teach ") + (w?.home || "top");
+  if (k === "bottom") return "Teach " + (w?.far || "bottom");
+  if (k === "test") return "Test";
+  return "Save";
+}
+function stepsFor(w) {
+  const keys = ["choose", ...(w?.steps || ["mechanism", "direction", "encoder", "top", "bottom", "test", "finish"])];
+  return keys.map((k) => [k, stepLabel(k, w)]);
+}
 
 function renderSteps(w) {
   const list = stepsFor(w), cur = w ? w.step : "choose";
   const idx = list.findIndex(([k]) => k === cur);
-  const canGo = (k, i) => w && !w.busy && i < idx && i > 0 && (w.recover ? k === "top" : ["direction", "encoder", "top", "bottom"].includes(k));
+  const canGo = (k, i) => w && !w.busy && i < idx && i > 0 && ["mechanism", "direction", "encoder", "top", "bottom"].includes(k);
   $("#steps").innerHTML = list.map(([k, label], i) =>
     `<button class="step ${i < idx ? "done" : ""} ${i === idx ? "current" : ""} ${canGo(k, i) ? "can-go" : ""}" data-goto="${canGo(k, i) ? k : ""}">
-      <span class="num">${i < idx ? "✓" : i + 1}</span><span>${label}</span></button>`).join("") +
-    `<p class="sub">${w ? (w.recover ? "Re-finding the top keeps the bottom that was taught before." : "Tap a finished step to go back to it.") : "The show stops while a motor is being set up."}</p>`;
+      <span class="num">${i < idx ? "✓" : i + 1}</span><span>${esc(label)}</span></button>`).join("") +
+    `<p class="sub">${w ? (w.recover ? `Re-finding the ${esc(w.home)} keeps the ${esc(w.far)} that was taught before.` : "Tap a finished step to go back to it.") : "The show stops while a motor is being set up."}</p>`;
 }
 $("#steps").addEventListener("click", (ev) => {
   const b = ev.target.closest("[data-goto]"); if (!b || !b.dataset.goto) return;
   send("wiz_goto", { step: b.dataset.goto });
 });
 
-const JOG = `
-  <div class="jog">
-    <div class="jog-col"><div class="jog-h">Up (wind in)</div>
-      <button class="big" data-jog="-50"><span class="gl">▲▲</span>Up 50 mm</button>
-      <button class="big" data-jog="-10"><span class="gl">▲</span>Up 10 mm</button>
-      <button class="big" data-jog="-1"><span class="gl">△</span>Up 1 mm</button></div>
-    <div class="jog-col"><div class="jog-h">Down (pay out)</div>
-      <button class="big" data-jog="50"><span class="gl">▼▼</span>Down 50 mm</button>
-      <button class="big" data-jog="10"><span class="gl">▼</span>Down 10 mm</button>
-      <button class="big" data-jog="1"><span class="gl">▽</span>Down 1 mm</button></div>
+// jog pad: negative = toward home, positive = toward the far end, in the motor's units
+const JOG_WORDS = {
+  spool: ["Up (wind in)", "Down (pay out)", "Up", "Down"],
+  linear: ["Toward home", "Toward far end", "Back", "Out"],
+  rotary: ["Toward start angle", "Toward end angle", "Back", "Turn"],
+  continuous: ["Backward", "Forward", "Back", "Fwd"],
+};
+function jogHtml(w) {
+  const [hA, hB, a, b] = JOG_WORDS[w.kind] || JOG_WORDS.spool;
+  const st = w.jog_steps || [50, 10, 1], u = w.unit || "mm";
+  const glyph = ["▲▲", "▲", "△"], glyphB = ["▼▼", "▼", "▽"];
+  return `<div class="jog">
+    <div class="jog-col"><div class="jog-h">${esc(hA)}</div>
+      ${st.map((d, k) => `<button class="big" data-jog="${-d}"><span class="gl">${glyph[k]}</span>${esc(a)} ${d} ${esc(u)}</button>`).join("")}</div>
+    <div class="jog-col"><div class="jog-h">${esc(hB)}</div>
+      ${st.map((d, k) => `<button class="big" data-jog="${d}"><span class="gl">${glyphB[k]}</span>${esc(b)} ${d} ${esc(u)}</button>`).join("")}</div>
     <button class="big stop jog-stop" data-act="stop"><span class="sq"></span>Stop moving</button>
   </div>`;
+}
 
 function msgBox(w) {
   if (!w) return "";
@@ -103,62 +123,108 @@ function msgBox(w) {
   return `<div class="msg ${w.busy ? "busy" : ""}">${esc(w.msg)}</div>`;
 }
 
+// mechanism step: choices are local until "Continue"
+const HOME_HINT = {
+  spool: ["its highest safe position, where it should stop when fully wound in", "its lowest safe position"],
+  linear: ["the end of travel you want as home (0)", "the other end of its safe travel"],
+  rotary: ["the start of its swing (0°)", "the end of its swing"],
+};
+const KIND_BLURB = {
+  spool: "Winds a cable in and out to raise and lower a hanging piece. Units: mm of cable.",
+  linear: "A lead screw or belt moving a carriage along a straight line. Units: mm.",
+  rotary: "Turns an arm, wing or crank between two angles. Units: degrees.",
+  continuous: "Spins without limits (wheels, propellers, cams). The motion design sets its speed. Units: rev/s.",
+};
+function mechHtml(w) {
+  if (!C.mech || C.mech.motor !== w.motor) C.mech = { motor: w.motor, kind: w.kind, size: w.size, bidir: !!w.bidirectional };
+  const kinds = C.kinds || {};
+  const k = C.mech.kind, info = kinds[k] || {};
+  const presets = (C.sizePresets || {})[k] || [];
+  const fine = k === "spool" || k === "linear" ? 0.5 : 0.1;
+  return `<div class="step-title">${esc(mname(w.motor))}: Mechanism</div>
+    <div class="step-text">What does this motor drive? This sets its units, its limits and the wording on the next steps.</div>
+    <div class="kind-grid">${Object.entries(kinds).map(([key, ki]) =>
+      `<button class="pick ${key === k ? "sel" : ""}" data-kind="${key}"><span class="p-name">${esc(ki.label)}</span>
+        <span class="p-state">${esc(KIND_BLURB[key] || "")}</span></button>`).join("")}</div>
+    <div class="sec-row"><span class="section-h">${esc(info.size_label || "Size")}</span>
+      <div class="stepper"><button class="mid" data-size="${-fine}">−</button>
+        <div class="step-val">${Number(C.mech.size).toFixed(fine < 0.5 ? 1 : 1)} ${esc(info.size_unit || "")}</div>
+        <button class="mid" data-size="${fine}">+</button></div></div>
+    <div class="chips">${presets.map((v) => `<button class="mid chip ${Number(C.mech.size) === v ? "sel" : ""}" data-preset="${v}">${v}${esc(info.size_unit || "")}</button>`).join("")}</div>
+    ${k === "continuous" ? `<div class="sec-row"><span class="section-h">Directions</span>
+      <div class="seg"><button class="mid ${!C.mech.bidir ? "sel" : ""}" data-bidir="0">Forward only</button>
+      <button class="mid ${C.mech.bidir ? "sel" : ""}" data-bidir="1">Both directions</button></div></div>
+      <div class="hint">${C.mech.bidir ? "Design values: 0 = full reverse, 0.5 = stopped, 1 = full forward." : "Design values: 0 = stopped, 1 = full speed forward."}</div>` : ""}
+    ${msgBox(w)}
+    <div class="spacer"></div>
+    <div class="step-actions sticky"><button class="big go" data-act="mech_ok" ${w.busy ? "disabled" : ""}>Continue</button></div>`;
+}
+
 function stepHtml(w) {
   const n = w?.node || {};
   const moving = n.moving || w?.busy;
   if (!w) return C.finished ? doneHtml() : chooseHtml();
-  const title = (t) => `<div class="step-title">${esc(mname(w.motor))}: ${t}</div>`;
+  const title = (t) => `<div class="step-title">${esc(mname(w.motor))}: ${esc(t)}</div>`;
+  const u = w.unit || "mm", d = w.test_step || 10, [homeHint, farHint] = HOME_HINT[w.kind] || HOME_HINT.spool;
   switch (w.step) {
+    case "mechanism":
+      return mechHtml(w);
     case "direction":
       return title("Direction") + `
-        <div class="step-text">Make sure the area under <b>${esc(mname(w.motor))}</b> is clear. Press <b>Test move</b>:
-          the motor moves 10 mm in the direction the software calls <b>down</b>. Watch the piece.</div>
+        <div class="step-text">Make sure ${esc(mname(w.motor))} can move freely. Press <b>Test move</b>: the motor moves
+          ${d} ${esc(u)} in the direction the software calls <b>positive</b>. It should <b>${esc(w.positive)}</b>.</div>
         ${msgBox(w)}
         <div class="step-actions">
-          ${!w.dir_tested || w.busy ? `<button class="big primary" data-act="dir_test" ${moving ? "disabled" : ""}>Test move (10 mm)</button>` :
-            `<button class="big go" data-act="lowered" ${moving ? "disabled" : ""}>Yes, it lowered</button>
-             <button class="big" data-act="raised" ${moving ? "disabled" : ""}>No, it went up</button>
+          ${!w.dir_tested || w.busy ? `<button class="big primary" data-act="dir_test" ${moving ? "disabled" : ""}>Test move (${d} ${esc(u)})</button>` :
+            `<button class="big go" data-act="lowered" ${moving ? "disabled" : ""}>Yes, it did</button>
+             <button class="big" data-act="raised" ${moving ? "disabled" : ""}>No, the other way</button>
              <button class="mid" data-act="dir_test" ${moving ? "disabled" : ""}>Move again</button>`}
         </div>`;
     case "encoder":
       return title("Encoder check") + `
-        <div class="step-text">The controller moves the motor 20 mm down and back while it compares the steps sent with what
+        <div class="step-text">The controller moves the motor ${2 * d} ${esc(u)} and back while it compares the steps sent with what
           the encoder magnet reports. If the encoder counts backwards it is corrected automatically.</div>
         ${msgBox(w)}
         <div class="step-actions"><button class="big primary" data-act="encoder" ${moving ? "disabled" : ""}>${w.error ? "Try again" : "Check encoder"}</button></div>`;
     case "top":
-      return title(w.recover ? "Find the top" : "Teach the top") + `
-        <div class="step-text">Jog the piece <b>up to its highest safe position</b>, the spot it should stop at when fully wound in.
-          Go slowly with the 1 mm buttons for the last part, then press <b>Set as top</b>. This becomes 0 mm.
-          ${w.recover ? "<br>Use the same spot as before: the bottom limit is measured from it." : ""}</div>
-        ${JOG}
+      return title((w.recover ? "Find the " : "Teach the ") + w.home) + `
+        <div class="step-text">Jog to <b>${esc(homeHint)}</b>. Use the smallest steps for the last part, then press
+          <b>Set as ${esc(w.home)}</b>. This becomes 0 ${esc(u)}.
+          ${w.recover ? `<br>Use the same spot as before: the ${esc(w.far)} is measured from it.` : ""}</div>
+        ${jogHtml(w)}
         ${msgBox(w)}
-        <div class="step-actions"><button class="big go" data-act="top" ${moving ? "disabled" : ""}>Set as top</button></div>`;
-    case "bottom":
-      return title("Teach the bottom") + `
-        <div class="step-text">Jog <b>down to the lowest safe position</b>. The motor will never be sent below it.
-          The readout on the right shows how far below the top you are.</div>
-        ${JOG}
+        <div class="step-actions"><button class="big go" data-act="top" ${moving ? "disabled" : ""}>Set as ${esc(w.home)}</button></div>`;
+    case "bottom": {
+      const tooClose = (n.pos_mm ?? 0) < 2 * d;
+      return title("Teach the " + w.far) + `
+        <div class="step-text">Jog to <b>${esc(farHint)}</b>. The motor will never be sent past it.
+          The readout on the right shows how far from the ${esc(w.home)} you are.</div>
+        ${jogHtml(w)}
         ${msgBox(w)}
-        <div class="step-actions"><button class="big go" data-act="bottom" ${moving || (n.pos_mm ?? 0) < 20 ? "disabled" : ""}>Set as bottom</button>
-          <span class="hint">${(n.pos_mm ?? 0) < 20 ? "Go at least 20 mm below the top." : ""}</span></div>`;
+        <div class="step-actions"><button class="big go" data-act="bottom" ${moving || tooClose ? "disabled" : ""}>Set as ${esc(w.far)}</button>
+          <span class="hint">${tooClose ? `Go at least ${2 * d} ${esc(u)} from the ${esc(w.home)}.` : ""}</span></div>`;
+    }
     case "test":
-      return title("Test") + `
-        <div class="step-text">The motor now moves slowly to the <b>middle</b>, the <b>bottom</b> (${mm(w.bottom_mm, 0)} mm) and back to the
-          <b>top</b>, staying inside the limits you taught. Watch that it stops at the right places.</div>
+      return title("Test") + (w.kind === "continuous" ? `
+        <div class="step-text">The motor turns forward for 3 seconds at a quarter of its top speed, then back the same amount.</div>` : `
+        <div class="step-text">The motor now moves slowly to the <b>middle</b>, the <b>${esc(w.far)}</b> (${mm(w.bottom_mm, 0)} ${esc(u)})
+          and back to the <b>${esc(w.home)}</b>, staying inside the limits you taught. Watch that it stops at the right places.</div>`) + `
         ${msgBox(w)}
-        <div class="step-actions"><button class="big primary" data-act="test" ${moving ? "disabled" : ""}>Run test moves</button>
+        <div class="step-actions"><button class="big primary" data-act="test" ${moving ? "disabled" : ""}>${w.kind === "continuous" ? "Run spin test" : "Run test moves"}</button>
           <button class="mid" data-act="skip_test" ${moving ? "disabled" : ""}>Skip</button></div>`;
     case "finish": {
-      const m = C.config.motors[w.motor] || {};
+      const m = C.config.motors[w.motor] || {}, kinfo = (C.kinds || {})[w.kind] || {};
       const rows = w.recover
-        ? [["Motor", mname(w.motor)], ["Board", w.mac], ["Top", "re-taught"], ["Bottom", `kept (${mm(C.tick?.travel?.[w.motor], 0)} mm)`]]
-        : [["Motor", mname(w.motor)], ["Board", w.mac], ["Motor direction", m.invert_dir ? "reversed" : "normal"],
-           ["Encoder direction", m.invert_encoder ? "reversed" : "normal"], ["Travel (top to bottom)", `${mm(w.bottom_mm, 0)} mm`],
-           ["Test moves", w.test_done ? "done" : "skipped"]];
+        ? [["Motor", mname(w.motor)], ["Board", w.mac], [cap(w.home), "re-taught"], [cap(w.far), `kept (${mm(C.tick?.travel?.[w.motor], 0)} ${u})`]]
+        : [["Motor", mname(w.motor)], ["Board", w.mac], ["Mechanism", kinfo.label || w.kind],
+           [kinfo.size_label || "Size", `${w.size} ${kinfo.size_unit || ""}`],
+           ["Motor direction", m.invert_dir ? "reversed" : "normal"], ["Encoder direction", m.invert_encoder ? "reversed" : "normal"],
+           ...(w.kind === "continuous" ? [["Directions", w.bidirectional ? "both" : "forward only"]]
+             : [[`Travel (${w.home} to ${w.far})`, `${mm(w.bottom_mm, 0)} ${u}`]]),
+           ["Test", w.test_done ? "done" : "skipped"]];
       return title("Save") + `
-        <div class="step-text">Check the summary and save. The motor will remember its position from now on, including
-          across power cuts, and the show can use it.</div>
+        <div class="step-text">Check the summary and save. ${w.kind === "continuous" ? "The show will drive this motor's speed." :
+          "The motor will remember its position from now on, including across power cuts, and the show can use it."}</div>
         <table class="summary">${rows.map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(b)}</td></tr>`).join("")}</table>
         ${msgBox(w)}
         <div class="step-actions"><button class="big go" data-act="finish" ${moving ? "disabled" : ""}>Save setup</button></div>`;
@@ -191,7 +257,8 @@ function chooseHtml() {
   const holder = (i) => nodes.find((nd) => nd.id === i && nd.mac !== C.selMac);
   const comm = C.tick?.commissioned || [];
   const lost = sel && C.selMotor === sel.id && nodeState(sel)[0] === "bad";
-  const canRecover = !isNew && (sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost);
+  const ends = (C.selMotor !== null && C.tick?.ends?.[C.selMotor]) || ["top", "bottom"];
+  const canRecover = C.tick?.kinds?.[C.selMotor] !== "continuous" && !isNew && (sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost);
   return `
     <div class="step-title">Choose the motor to set up</div>
     <div class="sec-row"><span class="section-h">1. Board</span>
@@ -213,8 +280,8 @@ function chooseHtml() {
     <div class="spacer"></div>
     <div class="step-actions sticky">
       <button class="big go" data-act="start" ${sel && C.selMotor !== null ? "" : "disabled"}>${isNew ? `Add M${n + 1} and start setup` : "Start full setup"}</button>
-      ${canRecover ? `<button class="big primary" data-act="recover">Find top only</button>` : ""}
-      <span class="hint">${canRecover ? "Find top only: for a motor that lost its position. Keeps its bottom limit." : ""}</span>
+      ${canRecover ? `<button class="big primary" data-act="recover">Find ${esc(ends[0])} only</button>` : ""}
+      <span class="hint">${canRecover ? `Find ${esc(ends[0])} only: for a motor that lost its position. Keeps its ${esc(ends[1])} limit.` : ""}</span>
     </div>`;
 }
 
@@ -238,6 +305,19 @@ $("#stepBox").addEventListener("click", async (ev) => {
   }
   const slot = ev.target.closest("[data-slot]");
   if (slot) { C.selMotor = +slot.dataset.slot; C.key = ""; render(); return; }
+  const kindB = ev.target.closest("[data-kind]");
+  if (kindB && C.mech) {
+    C.mech.kind = kindB.dataset.kind;
+    C.mech.size = (C.kinds?.[C.mech.kind] || {}).size_default ?? 1;
+    if (C.mech.kind === "spool") C.mech.size = C.config.mechanics.spool_diameter_mm;
+    C.key = ""; render(); return;
+  }
+  const sz = ev.target.closest("[data-size]");
+  if (sz && C.mech) { C.mech.size = Math.max(0.1, Math.round((Number(C.mech.size) + Number(sz.dataset.size)) * 10) / 10); C.key = ""; render(); return; }
+  const pr = ev.target.closest("[data-preset]");
+  if (pr && C.mech) { C.mech.size = Number(pr.dataset.preset); C.key = ""; render(); return; }
+  const bd = ev.target.closest("[data-bidir]");
+  if (bd && C.mech) { C.mech.bidir = bd.dataset.bidir === "1"; C.key = ""; render(); return; }
   const jog = ev.target.closest("[data-jog]");
   if (jog) { send("wiz_jog", { mm: +jog.dataset.jog }); return; }
   const b = ev.target.closest("[data-act]"); if (!b || b.disabled) return;
@@ -251,8 +331,9 @@ $("#stepBox").addEventListener("click", async (ev) => {
   }
   else if (a === "stop") send("wiz_stop");
   else if (a === "dir_test") send("wiz_dir_test");
-  else if (a === "lowered") send("wiz_dir_answer", { lowered: true });
-  else if (a === "raised") send("wiz_dir_answer", { lowered: false });
+  else if (a === "lowered") send("wiz_dir_answer", { correct: true });
+  else if (a === "raised") send("wiz_dir_answer", { correct: false });
+  else if (a === "mech_ok") send("wiz_mech", { kind: C.mech.kind, size: C.mech.size, bidirectional: C.mech.bidir });
   else if (a === "encoder") send("wiz_encoder");
   else if (a === "top") send("wiz_top");
   else if (a === "bottom") send("wiz_bottom");
@@ -280,35 +361,37 @@ function renderReadout(w) {
   if (!w) {
     ro.innerHTML = `<div class="ro-label">Motor Setup</div>
       <div class="step-text" style="font-size:14px">Run this for every new or replaced PD Stepper. It sets the motor direction, checks the
-        encoder, and teaches the top and bottom. Without home switches, the motors use the taught top and the encoder to
-        know where they are after a power cut.</div>`;
+        encoder, and teaches the two ends of its travel (top and bottom, home and far end, or start and end angle).
+        Without home switches, the motors use the taught home and the encoder to know where they are after a power cut.
+        Continuous-rotation motors skip the ends: the show drives their speed.</div>`;
     return;
   }
   const n = w.node || {};
   const bottom = w.bottom_mm ?? (w.recover ? C.tick?.travel?.[w.motor] : null);
+  const u = w.unit || "mm", home = w.home || "top", far = w.far || "bottom", cont = w.kind === "continuous";
   ro.innerHTML = `
     <div><div class="ro-name">${esc(mname(w.motor))}</div><div class="ro-mac">${esc(w.mac)}</div></div>
-    <div><div class="ro-label">${n.homed ? "Below top" : "Position"}</div>
-      ${n.homed ? `<div class="ro-pos">${mm(n.pos_mm)} <small>mm</small></div>` :
-        `<div class="ro-wait">Known once the top is taught</div>`}</div>
+    <div><div class="ro-label">${n.homed && !cont ? `From the ${esc(home)}` : "Position"}</div>
+      ${n.homed && !cont ? `<div class="ro-pos">${mm(n.pos_mm)} <small>${esc(u)}</small></div>` :
+        `<div class="ro-wait">${cont ? "Continuous rotation: no ends to teach" : `Known once the ${esc(home)} is taught`}</div>`}</div>
     <div class="ro-rows">
-      <span>Encoder</span><span class="v">${mm(n.enc_mm)} mm</span>
+      <span>Encoder</span><span class="v">${mm(n.enc_mm)} ${esc(u)}</span>
       <span>Magnet</span><span class="v">${esc(n.magnet || "—")}</span>
-      <span>Bottom</span><span class="v">${bottom ? mm(bottom, 0) + " mm" : "—"}</span>
+      ${cont ? "" : `<span>${esc(cap(far))}</span><span class="v">${bottom ? mm(bottom, 0) + " " + esc(u) : "—"}</span>`}
     </div>
     <div class="ro-leds">
       <span>${led(n.online ? "on" : "bad")}Link</span>
       <span>${led(n.moving ? "warn" : "")}Moving</span>
-      <span>${led(n.calibrated ? "on" : "")}Top taught</span>
+      <span>${led(n.calibrated ? "on" : "")}${esc(cap(home))} taught</span>
       <span>${led(n.limits ? "on" : "")}Limits on</span>
     </div>
-    ${w.sim_drop_mm !== undefined ? `<div class="sim-hint"><b>Simulator:</b> the load is really ${mm(w.sim_drop_mm)} mm below its physical top.
-      Use this in place of watching the piece.</div>` : ""}
-    ${n.homed ? `<canvas id="gauge"></canvas>` : ""}`;
-  if (n.homed) drawGauge(n.pos_mm, bottom, w.sim_drop_mm);
+    ${w.sim_drop_mm !== undefined ? `<div class="sim-hint"><b>Simulator:</b> the moving part is really at ${mm(w.sim_drop_mm)} ${esc(u)}
+      from its physical ${esc(home || "start")}. Use this in place of watching it.</div>` : ""}
+    ${n.homed && !cont ? `<canvas id="gauge"></canvas>` : ""}`;
+  if (n.homed && !cont) drawGauge(n.pos_mm, bottom, w.sim_drop_mm, home, far);
 }
 
-function drawGauge(pos, bottom, truth) {
+function drawGauge(pos, bottom, truth, home = "top", far = "bottom") {
   const cv = $("#gauge"); if (!cv || !cv.clientWidth) return;
   const dpr = window.devicePixelRatio || 1;
   cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
@@ -321,8 +404,8 @@ function drawGauge(pos, bottom, truth) {
   const cx = W / 2;
   ctx.strokeStyle = "#c9cdd2"; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(cx, T); ctx.lineTo(cx, H - B); ctx.stroke(); ctx.setLineDash([]);
   const mark = (v, label, col) => { ctx.fillStyle = col; ctx.fillRect(cx - 40, y(v) - 1, 80, 2); ctx.fillText(label, cx + 46, y(v) + 4); };
-  mark(0, "top 0", "#4a525b");
-  if (bottom) mark(bottom, `bottom ${Math.round(bottom)}`, "#4a525b");
+  mark(0, `${home} 0`, "#4a525b");
+  if (bottom) mark(bottom, `${far} ${Math.round(bottom)}`, "#4a525b");
   if (truth !== undefined && truth !== null) {   // simulator only: where the load really is
     ctx.fillStyle = "#d18a00"; ctx.beginPath(); ctx.arc(cx - 52, y(truth), 4, 0, 7); ctx.fill();
     ctx.fillText("sim", cx - 82, y(truth) + 4);
@@ -355,7 +438,7 @@ function render() {
   // rebuild the step panel only when something that changes it changed (keeps taps reliable)
   const n = w?.node || {};
   const key = JSON.stringify(w ? [w.step, w.busy, w.msg, w.error, w.dir_tested, w.test_done, w.bottom_mm, !!n.moving,
-    (n.pos_mm ?? 0) >= 20, C.config.motors[w.motor]] :
+    (n.pos_mm ?? 0) >= 2 * (w.test_step || 10), C.config.motors[w.motor], w.kind, C.mech] :
     [C.finished, C.selMac, C.selMotor, (t.nodes || []).filter((x) => x.online).map((x) => [x.mac, x.id, nodeState(x)[1]]), t.commissioned]);
   if (key !== C.key) { C.key = key; $("#stepBox").innerHTML = stepHtml(w); }
   renderReadout(w);

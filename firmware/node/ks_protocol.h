@@ -15,7 +15,7 @@
 
 #define KS_MAGIC0 'K'
 #define KS_MAGIC1 'S'
-#define KS_PROTO_VERSION 2   // v2: position memory, soft limits, setup data in status
+#define KS_PROTO_VERSION 3   // v3: velocity mode for continuous rotation (v2: position memory, soft limits)
 
 #define KS_MAX_MOTORS 16      // frame packet holds up to 16 motors (136 bytes)
 #define KS_ID_UNASSIGNED 0xFF
@@ -117,9 +117,13 @@ struct KsHeader {
 };
 
 struct KsMotorTarget {
-  int32_t pos;  // microsteps, 0 = fully wound in (home)
-  int32_t vel;  // microsteps/s feed-forward
+  int32_t pos;  // microsteps, 0 = home (taught top / start), or KS_POS_VELOCITY
+  int32_t vel;  // microsteps/s: feed-forward, or the speed to run at in velocity mode
 };
+
+// KsMotorTarget.pos == KS_POS_VELOCITY: continuous rotation. The motor runs at `vel`
+// (signed) instead of going to a position. Ignored by a node that has soft limits set.
+#define KS_POS_VELOCITY ((int32_t)0x80000000)
 
 struct KsFrame {
   KsHeader h;

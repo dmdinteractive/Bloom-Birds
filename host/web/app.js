@@ -48,6 +48,7 @@ async function loadState() {
   const st = await api("GET", "/api/state");
   S.config = st.config; S.show = st.show; S.shows = st.shows; S.patterns = st.patterns;
   S.common = st.common_params; S.eases = st.eases; S.spm = st.steps_per_mm; S.simulate = st.simulate;
+  S.kinds = st.kinds || {};
   $$(".sim-only").forEach((b) => (b.hidden = !S.simulate));
   const mem = st.config.mechanics.home_mode === "memory";
   $('[data-all="set_zero"]').hidden = mem;          // in memory mode the top is taught in Motor Setup
@@ -238,7 +239,7 @@ function renderEditor() {
     h += sec("Pattern") + prop(`<label for="c_pat">Generator</label>`, `<select id="c_pat" data-c="pattern">${Object.entries(S.patterns).map(([k, p]) =>
       `<option value="${k}" ${k === c.pattern ? "selected" : ""}>${esc(p.label)}</option>`).join("")}</select>`);
     if (c.pattern === "pose") {
-      h += sec("Axis heights (0 = top, 1 = bottom)");
+      h += sec("Axis positions (0 = home, 1 = far end; continuous: speed)");
       const vals = c.params.values || [];
       S.config.motors.forEach((m, i) => { h += sliderProp(i, { label: m.name, min: 0, max: 1, step: 0.01, default: 0.5, unit: "" }, vals[i], "pose"); });
     } else {
@@ -439,26 +440,40 @@ function fitCanvas(cv) {
 const FONT = "11px 'Segoe UI', -apple-system, Roboto, Arial, sans-serif";
 const MONO = "11px Consolas, Menlo, 'DejaVu Sans Mono', monospace";
 
-/** Axis monitor: engineering-style elevation view with a millimetre ruler. */
+/** Axis monitor: engineering-style elevation view. One ruler in real units when every motor uses
+ *  the same units; otherwise each axis is drawn as a share of its own travel (0-100%). */
 function drawStage() {
   const cv = $("#stage"); if (!cv.clientWidth || !S.config) return;
   const [ctx, W, H] = fitCanvas(cv);
   ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
   const motors = S.config.motors, n = motors.length, tk = S.tick;
   const L = 58, R = 16, T = 26, B = 40;
+  const units = motors.map((m, i) => unitOf(i));
+  const uniform = units.every((u) => u === units[0]);
   const travelMax = Math.max(...motors.map((m, i) => travelOf(i)));
+  // y for motor i at value v (continuous rotation: |speed|)
+  const yv = (i, v) => T + (Math.abs(v) / (uniform ? travelMax : travelOf(i) || 1)) * (H - T - B);
   const ymm = (mm) => T + (mm / travelMax) * (H - T - B);
   // ruler + grid
-  const step = travelMax > 1500 ? 250 : travelMax > 600 ? 100 : 50;
   ctx.font = MONO; ctx.textAlign = "right"; ctx.lineWidth = 1;
-  for (let mm = 0; mm <= travelMax + 1e-6; mm += step) {
-    const y = Math.round(ymm(mm)) + 0.5;
-    ctx.strokeStyle = mm % (step * 2) === 0 ? "#dfe2e5" : "#eff1f3";
-    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
-    ctx.fillStyle = "#6d757e"; ctx.fillText(`${mm}`, L - 8, y + 4);
+  if (uniform) {
+    const step = niceStep(travelMax);
+    for (let mm = 0; mm <= travelMax + 1e-6; mm += step) {
+      const y = Math.round(ymm(mm)) + 0.5;
+      ctx.strokeStyle = Math.round(mm / step) % 2 === 0 ? "#dfe2e5" : "#eff1f3";
+      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
+      ctx.fillStyle = "#6d757e"; ctx.fillText(`${+mm.toFixed(2)}`, L - 8, y + 4);
+    }
+  } else {
+    for (let k = 0; k <= 4; k++) {
+      const y = Math.round(T + (k / 4) * (H - T - B)) + 0.5;
+      ctx.strokeStyle = k % 2 === 0 ? "#dfe2e5" : "#eff1f3";
+      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
+      ctx.fillStyle = "#6d757e"; ctx.fillText(`${k * 25}%`, L - 8, y + 4);
+    }
   }
   ctx.save(); ctx.translate(12, (T + H - B) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.font = FONT;
-  ctx.fillText("Payout (mm)", 0, 0); ctx.restore();
+  ctx.fillText(uniform ? `From home (${units[0]})` : "From home (% of each axis' travel)", 0, 0); ctx.restore();
   // beam
   ctx.fillStyle = "#4a525b"; ctx.fillRect(L, T - 8, W - L - R, 3);
   const colW = (W - L - R) / n;
@@ -469,24 +484,24 @@ function drawStage() {
     const out = tk?.out_mm?.[i] ?? 0, act = tk?.actual_mm?.[i], lim = tk?.limited?.[i];
     // travel envelope
     ctx.strokeStyle = "#c9cdd2"; ctx.setLineDash([2, 3]);
-    ctx.beginPath(); ctx.moveTo(cx, ymm(0)); ctx.lineTo(cx, ymm(travel)); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = "#8a929b"; ctx.fillRect(cx - 4, ymm(travel) - 0.5, 8, 1);
-    // spool + cable
+    ctx.beginPath(); ctx.moveTo(cx, yv(i, 0)); ctx.lineTo(cx, yv(i, travel)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "#8a929b"; ctx.fillRect(cx - 4, yv(i, travel) - 0.5, 8, 1);
+    // drive + link
     ctx.fillStyle = "#6d757e"; ctx.fillRect(cx - 6, T - 12, 12, 7);
-    ctx.strokeStyle = "#2a3036"; ctx.beginPath(); ctx.moveTo(cx, T - 5); ctx.lineTo(cx, ymm(out)); ctx.stroke();
-    // commanded carriage
+    ctx.strokeStyle = "#2a3036"; ctx.beginPath(); ctx.moveTo(cx, T - 5); ctx.lineTo(cx, yv(i, out)); ctx.stroke();
+    // commanded position (continuous rotation: speed)
     ctx.fillStyle = lim ? "#c62828" : "#2a3036";
-    ctx.fillRect(cx - 7, ymm(out) - 4, 14, 8);
+    ctx.fillRect(cx - 7, yv(i, out) - 4, 14, 8);
     // reported position
     if (act !== null && act !== undefined) {
       ctx.strokeStyle = "#2f63a4"; ctx.lineWidth = 1.5;
-      ctx.strokeRect(cx - 10.5, ymm(act) - 6.5, 21, 13); ctx.lineWidth = 1;
+      ctx.strokeRect(cx - 10.5, yv(i, act) - 6.5, 21, 13); ctx.lineWidth = 1;
     }
     // labels
     ctx.textAlign = "center"; ctx.fillStyle = "#1b1f23"; ctx.font = FONT;
     ctx.fillText(m.name, cx, H - 22);
     ctx.fillStyle = "#4a525b"; ctx.font = MONO;
-    ctx.fillText(out.toFixed(0), cx, H - 8);
+    ctx.fillText(fmtVal(out, units[i]), cx, H - 8);
   }
   ctx.textAlign = "left"; ctx.font = FONT; ctx.fillStyle = "#6d757e";
   ctx.fillText(tk?.armed ? "OUTPUT: ENABLED" : "OUTPUT: PREVIEW", L, 12);
@@ -515,7 +530,7 @@ function drawScore() {
     const y = Math.round(g.vy(k / 4)) + 0.5;
     ctx.strokeStyle = k % 2 === 0 ? SCOPE.gridMajor : SCOPE.grid;
     ctx.beginPath(); ctx.moveTo(g.L, y); ctx.lineTo(W - g.R, y); ctx.stroke();
-    ctx.fillStyle = SCOPE.axis; ctx.textAlign = "right"; ctx.fillText(k === 0 ? "TOP" : k === 4 ? "BOT" : (k / 4).toFixed(2), g.L - 6, y + 4);
+    ctx.fillStyle = SCOPE.axis; ctx.textAlign = "right"; ctx.fillText(k === 0 ? "HOME" : k === 4 ? "FAR" : (k / 4).toFixed(2), g.L - 6, y + 4);
   }
   const stepT = dur > 600 ? 60 : dur > 240 ? 30 : dur > 90 ? 10 : dur > 20 ? 5 : dur > 8 ? 2 : 1;
   ctx.textAlign = "center";
@@ -681,11 +696,20 @@ function nodeFault(nd) {
     const setupMac = S.tick?.setup_macs?.[nd.id];
     if (S.tick?.commissioned?.[nd.id] && setupMac && setupMac !== nd.mac) return "Different board than was set up: run Motor Setup";
     if (!f.includes("calibrated")) return "Not set up: run Motor Setup";
-    if (!f.includes("homed")) return "Position unknown: Motor Setup > Find top";
+    if (!f.includes("homed") && S.tick?.kinds?.[nd.id] !== "continuous") return "Position unknown: Motor Setup > Find home";
   }
   return "";
 }
 const memoryMode = () => (S.tick?.home_mode || S.config?.mechanics.home_mode) === "memory";
+const kindOf = (m) => (S.kinds || {})[m?.kind || "spool"] || {};
+const JOG_STEPS = { spool: [50, 10, 1], linear: [20, 5, 0.5], rotary: [45, 10, 1], continuous: [1, 0.25, 0.05] };
+const jogSteps = (i) => JOG_STEPS[S.tick?.kinds?.[i] || "spool"] || JOG_STEPS.spool;
+const unitOf = (i) => S.tick?.units?.[i] || "mm";
+const fmtVal = (v, u) => (u === "rev/s" ? v.toFixed(2) : v.toFixed(0)) + (u === "°" ? "°" : u === "mm" ? "" : " " + u);
+function niceStep(range) {
+  const raw = range / 8, p = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  return [1, 2, 2.5, 5, 10].map((k) => k * p).find((s) => s >= raw) || raw;
+}
 const travelOf = (i) => S.tick?.travel?.[i] ?? (S.config.motors[i].travel_mm || S.config.mechanics.travel_mm);
 function renderNodes() {
   const tb = $("#nodeRows"); if (!S.tick) return;
@@ -719,10 +743,8 @@ function renderNodes() {
         <button class="btn small" data-node="home" data-id="${id}">${mem ? "To Top" : "Home"}</button>
         ${mem ? "" : `<button class="btn small" data-node="set_zero" data-id="${id}" title="Current position = home">Zero</button>`}
         <span class="gsep"></span>
-        <button class="btn small" data-node="jog" data-id="${id}" data-mm="-50" title="Wind in 50 mm">−50</button>
-        <button class="btn small" data-node="jog" data-id="${id}" data-mm="-10" title="Wind in 10 mm">−10</button>
-        <button class="btn small" data-node="jog" data-id="${id}" data-mm="10" title="Pay out 10 mm">+10</button>
-        <button class="btn small" data-node="jog" data-id="${id}" data-mm="50" title="Pay out 50 mm">+50</button>
+        ${jogSteps(id).slice(0, 2).map((d) => `<button class="btn small" data-node="jog" data-id="${id}" data-mm="${-d}" title="${d} ${esc(unitOf(id))} toward home">−${d}</button>`).join("")}
+        ${jogSteps(id).slice(0, 2).reverse().map((d) => `<button class="btn small" data-node="jog" data-id="${id}" data-mm="${d}" title="${d} ${esc(unitOf(id))} away from home">+${d}</button>`).join("")}
         <span class="gsep"></span>
         <button class="btn small" data-node="enable" data-id="${id}" data-on="0">Release</button>
         <button class="btn small" data-node="remove" data-id="${id}" title="Remove this motor from the sculpture">Remove</button>` : ""}
@@ -782,13 +804,13 @@ $$("[data-all]").forEach((b) => b.addEventListener("click", () => {
 // ------------------------------------------------------------ setup
 const MECH_FIELDS = [
   { sec: "Drive train" },
-  { key: "spool_diameter_mm", label: "Spool diameter", unit: "mm", step: 0.1, help: "Effective diameter where the cable wraps." },
-  { key: "travel_mm", label: "Travel", unit: "mm", step: 1, help: "Maximum cable paid out below home." },
+  { key: "spool_diameter_mm", label: "Spool diameter", unit: "mm", step: 0.1, help: "Default for cable-spool motors: effective diameter where the cable wraps. Other mechanisms set their size per motor." },
+  { key: "travel_mm", label: "Travel", unit: "mm", step: 1, help: "Default for cable-spool motors until their ends are taught." },
   { key: "full_steps_per_rev", label: "Motor steps/rev", options: [200, 400] },
   { key: "microsteps", label: "Microstepping", options: [4, 8, 16, 32, 64] },
   { sec: "Motion limits" },
-  { key: "max_speed_mm_s", label: "Max velocity", unit: "mm/s", step: 1 },
-  { key: "max_accel_mm_s2", label: "Max acceleration", unit: "mm/s²", step: 1 },
+  { key: "max_speed_mm_s", label: "Max velocity", unit: "mm/s", step: 1, help: "Default for cable-spool motors. Set other motors per motor (Axis Layout table)." },
+  { key: "max_accel_mm_s2", label: "Max acceleration", unit: "mm/s²", step: 1, help: "Default for cable-spool motors." },
   { sec: "Driver" },
   { key: "run_current_pct", label: "Run current", unit: "%", step: 1 },
   { key: "hold_current_pct", label: "Hold current", unit: "%", step: 1 },
@@ -871,14 +893,23 @@ function renderLayoutTable() {
     <td><input type="text" data-l="name" data-i="${i}" value="${esc(m.name)}" aria-label="Name"></td>
     <td><input type="number" step="0.01" min="0" max="1" data-l="x" data-i="${i}" value="${m.x}" aria-label="X"></td>
     <td><input type="number" step="0.01" min="0" max="1" data-l="y" data-i="${i}" value="${m.y}" aria-label="Y"></td>
+    <td><select data-l="kind" data-i="${i}" aria-label="Mechanism">${Object.entries(S.kinds || {}).map(([k, ki]) =>
+      `<option value="${k}" ${(m.kind || "spool") === k ? "selected" : ""}>${esc(ki.label)}</option>`).join("")}</select></td>
+    <td><input type="number" step="0.1" min="0.1" data-l="size" data-i="${i}" value="${m.size ?? ""}" placeholder="${kindOf(m).size_default ?? ""}" aria-label="Size" title="${esc(kindOf(m).size_label || "")}"></td>
+    <td><input type="number" step="any" data-l="max_speed" data-i="${i}" value="${m.max_speed ?? ""}" placeholder="default" aria-label="Max speed" title="${esc(kindOf(m).unit)}/s"></td>
+    <td><input type="number" step="any" data-l="max_accel" data-i="${i}" value="${m.max_accel ?? ""}" placeholder="default" aria-label="Max acceleration" title="${esc(kindOf(m).unit)}/s²"></td>
     <td><input type="number" step="1" data-l="trim_mm" data-i="${i}" value="${m.trim_mm || 0}" aria-label="Trim"></td>
-    <td>${m.commissioned && m.bottom_fs ? `<span class="sub" title="Taught in Motor Setup. Re-run Motor Setup to change it.">taught ${(m.bottom_fs * Math.PI * S.config.mechanics.spool_diameter_mm / S.config.mechanics.full_steps_per_rev).toFixed(0)} mm</span>` :
+    <td>${(m.kind || "spool") === "continuous" ? `<select data-l="bidirectional" data-i="${i}" aria-label="Directions"><option value="0" ${m.bidirectional ? "" : "selected"}>forward only</option><option value="1" ${m.bidirectional ? "selected" : ""}>both directions</option></select>` :
+      m.commissioned && m.bottom_fs ? `<span class="sub" title="Taught in Motor Setup. Re-run Motor Setup to change it.">taught ${(S.tick?.travel?.[i] ?? 0).toFixed(0)} ${esc(kindOf(m).unit)}</span>` :
       `<input type="number" step="1" data-l="travel_mm" data-i="${i}" value="${m.travel_mm ?? ""}" placeholder="default" aria-label="Travel">`}</td></tr>`).join("");
 }
 $("#layoutRows").addEventListener("input", (ev) => {
   const t = ev.target, m = S.layoutMotors[+t.dataset.i]; if (!m) return;
   const k = t.dataset.l;
   if (k === "name") m.name = t.value;
+  else if (k === "kind") { m.kind = t.value; renderLayoutTable(); }
+  else if (k === "bidirectional") m.bidirectional = t.value === "1";
+  else if (["size", "max_speed", "max_accel"].includes(k)) m[k] = t.value === "" ? null : parseFloat(t.value);
   else if (k === "travel_mm") m.travel_mm = t.value === "" ? null : parseFloat(t.value);
   else m[k] = k === "trim_mm" ? parseFloat(t.value) || 0 : clamp(parseFloat(t.value) || 0);
 });

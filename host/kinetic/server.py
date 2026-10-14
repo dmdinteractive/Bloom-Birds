@@ -22,7 +22,7 @@ from aiohttp import WSMsgType, web
 
 from . import motion as M
 from . import protocol as P
-from .config import relayout_motors
+from .config import KINDS, relayout_motors
 from .engine import Engine
 
 log = logging.getLogger("kinetic.server")
@@ -51,6 +51,8 @@ def create_app(engine: Engine) -> web.Application:
             "common_params": M.COMMON_PARAMS,
             "eases": M.EASES,
             "steps_per_mm": engine.cfg.steps_per_mm,
+            "kinds": KINDS,
+            "size_presets": engine.SIZE_PRESETS,
             "simulate": engine.cfg.data.get("simulate", False),
             "host": host_info(),
         })
@@ -80,8 +82,18 @@ def create_app(engine: Engine) -> web.Application:
         if "layout_preset" in body:
             n = int(body.pop("layout_preset_count", engine.cfg.motor_count))
             body["motors"] = relayout_motors(engine.cfg.motors, max(1, min(16, n)), body.pop("layout_preset"))
+        old_kinds = {m["id"]: m.get("kind", "spool") for m in engine.cfg.motors}
         engine.cfg.update(body)
+        for m in engine.cfg.motors:
+            before, after = old_kinds.get(m["id"], "spool"), m.get("kind", "spool")
+            if before != after and "continuous" in (before, after):
+                # switching between position and speed control: the taught setup no longer applies
+                m["commissioned"] = False
+                m.pop("bottom_fs", None)
+                engine.event(f"{m.get('name', 'Motor')} changed to {after}: run Motor Setup for it", "warn")
         engine.cfg.save()
+        engine.push_config()
+        engine.push_limits()
         if engine.cfg.motor_count != old_n:
             engine.arm(False)
             engine.resize()
@@ -91,10 +103,14 @@ def create_app(engine: Engine) -> web.Application:
         body = await req.json()
         cfg = engine.cfg
         travel = [cfg.travel(i) for i in range(cfg.motor_count)]
+        n = cfg.motor_count
+        # continuous motors: the curve is a speed, so the limit that matters is how fast the
+        # speed may change (acceleration)
+        vmax = [cfg.amax(i) if cfg.is_continuous(i) else cfg.vmax(i) for i in range(n)]
+        amax = [cfg.amax(i) * 20 if cfg.is_continuous(i) else cfg.amax(i) for i in range(n)]
         try:
             data = await asyncio.get_running_loop().run_in_executor(
-                None, M.render_clip, body["clip"], cfg.motors, travel,
-                cfg.mech["max_speed_mm_s"], cfg.mech["max_accel_mm_s2"])
+                None, M.render_clip, body["clip"], cfg.motors, travel, vmax, amax)
         except Exception as e:  # noqa: BLE001
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response(data)
@@ -227,7 +243,9 @@ def handle_command(engine: Engine, msg: dict):
     elif c == "wiz_dir_test":
         engine.wiz_direction_test()
     elif c == "wiz_dir_answer":
-        engine.wiz_direction_answer(bool(msg["lowered"]))
+        engine.wiz_direction_answer(bool(msg.get("correct", msg.get("lowered"))))
+    elif c == "wiz_mech":
+        engine.wiz_mechanism(str(msg["kind"]), msg.get("size"), msg.get("bidirectional"))
     elif c == "wiz_encoder":
         engine.wiz_encoder_check()
     elif c == "wiz_top":

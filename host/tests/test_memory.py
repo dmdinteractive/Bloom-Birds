@@ -149,7 +149,7 @@ def test_soft_limits_clamp_show_and_jogs(rig):
     async def go():
         runner = asyncio.create_task(eng.run())
         await asyncio.sleep(0.5)
-        eng.jog(0, cfg.mech["travel_mm"] + 300, speed_mm_s=2000)   # asks for 300 mm past the bottom
+        eng.jog(0, cfg.mech["travel_mm"] + 300, speed=2000)   # asks for 300 mm past the bottom
         await asyncio.sleep(9)                                       # node caps speed at 225 mm/s
         runner.cancel()
     asyncio.run(go())
@@ -213,6 +213,12 @@ def test_setup_wizard_on_a_miswired_board(rig):
         old = next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:03")
         assert old.id == P.ID_UNASSIGNED          # previous board released from the slot
 
+        # 0. mechanism: it drives a cable spool
+        assert eng.wizard["step"] == "mechanism"
+        eng.wiz_mechanism("spool")
+        await idle()
+        assert eng.wizard["step"] == "direction"
+
         # 1. direction: the tech watches the load
         before = true_mm()
         eng.wiz_direction_test()
@@ -246,7 +252,7 @@ def test_setup_wizard_on_a_miswired_board(rig):
         assert eng.wizard["step"] == "test" and abs(eng.wizard["bottom_mm"] - 500) < 1
 
         # limits are live: a free jog is not allowed now, a normal one stops at the bottom
-        eng.jog(slot, 200, speed_mm_s=200)
+        eng.jog(slot, 200, speed=200)
         await asyncio.sleep(3)
         assert true_mm() <= 500.5
 
@@ -390,3 +396,98 @@ def test_set_motor_count(rig):
         eng.set_motor_count(2)                # M3, M4 have boards reporting
     eng.set_motor_count(2, force=True)
     assert cfg.motor_count == 2
+
+
+# ---------------------------------------------------------------- other mechanisms
+
+def test_rotary_motor_moves_in_degrees(rig):
+    cfg, tx, eng = rig
+    cfg.motors[0].update({"kind": "rotary", "size": 5.0})          # 5:1 gearbox
+    spu = cfg.spu(0)
+    assert abs(spu - 3200 / 72) < 1e-6                             # 72 output degrees per motor turn
+    cfg.motors[0]["travel_mm"] = 180.0                             # 0..180 degrees
+    eng.send_cmd(P.C_SET_LIMITS, 0, args=[0, 0, 0])
+    pose = {"id": "rz", "name": "pose", "type": "pattern", "pattern": "pose", "duration": 30, "fade": 0,
+            "params": {"values": [0.5] * cfg.motor_count}}
+    eng.save_show({**eng.show, "clips": eng.show["clips"] + [pose]})
+    eng.push_config(0)
+
+    async def go():
+        t = asyncio.create_task(eng.run())
+        await asyncio.sleep(0.6)
+        eng.arm(True)
+        eng.solo("rz")
+        await asyncio.sleep(9)
+        t.cancel()
+    asyncio.run(go())
+    assert abs(node(tx, 0).steps / spu - 90.0) < 1.0               # half of 180 degrees
+
+
+def test_continuous_motor_runs_at_speed_and_respects_limits(rig):
+    cfg, tx, eng = rig
+    cfg.motors[0].update({"kind": "continuous", "size": 1.0, "max_speed": 1.0, "max_accel": 2.0})
+    cfg.motors[1].update({"kind": "continuous", "size": 1.0, "max_speed": 1.0, "max_accel": 2.0})
+    eng.send_cmd(P.C_SET_LIMITS, 0, args=[0, 0, 0])               # M1: set up as continuous (no limits)
+    # M2's board still has taught limits -> it must refuse to free-run
+    pose = {"id": "cz", "name": "spin", "type": "pattern", "pattern": "pose", "duration": 30, "fade": 0,
+            "params": {"values": [0.5] * cfg.motor_count}}
+    eng.save_show({**eng.show, "clips": eng.show["clips"] + [pose]})
+    eng.push_config(0)
+    eng.push_config(1)
+    samples = []
+
+    async def go():
+        t = asyncio.create_task(eng.run())
+        await asyncio.sleep(0.6)
+        eng.arm(True)
+        eng.solo("cz")
+        await asyncio.sleep(4)
+        s0, m2a = node(tx, 0).steps, node(tx, 1).steps
+        await asyncio.sleep(2)
+        samples.extend([(node(tx, 0).steps - s0) / 2, node(tx, 1).steps - m2a])
+        t.cancel()
+    asyncio.run(go())
+    rate, m2_moved = samples
+    assert abs(rate / cfg.spu(0) - 0.5) < 0.05                    # 0.5 rev/s = half of max
+    assert abs(m2_moved) < cfg.spu(1) * 0.05                       # limited board ignored velocity mode
+    assert abs(eng.out_mm[0] - 0.5) < 0.01                         # screens show the speed
+
+
+def test_wizard_for_continuous_motor_skips_limits(rig):
+    cfg, tx, eng = rig
+    fresh = next(n for n in tx.nodes if n.id == P.ID_UNASSIGNED)
+
+    async def idle():
+        await asyncio.sleep(0.4)
+        for _ in range(300):
+            if not eng.wizard or not eng.wizard["busy"]:
+                return
+            await asyncio.sleep(0.1)
+        raise AssertionError("wizard step hung")
+
+    async def go():
+        t = asyncio.create_task(eng.run())
+        await asyncio.sleep(0.6)
+        eng.wiz_start(fresh.mac, cfg.motor_count)
+        await idle()
+        eng.wiz_mechanism("continuous", 1.0, True)
+        await idle()
+        assert eng.wizard_snapshot()["steps"] == ["mechanism", "direction", "encoder", "test", "finish"]
+        before = fresh.phys_fs
+        eng.wiz_direction_test()
+        await idle()
+        eng.wiz_direction_answer(fresh.phys_fs > before)
+        await idle()
+        eng.wiz_encoder_check()
+        await idle()
+        assert eng.wizard["error"] == "" and eng.wizard["step"] == "test"
+        eng.wiz_test()
+        await idle()
+        assert eng.wizard["test_done"]
+        eng.wiz_finish()
+        await asyncio.sleep(0.6)
+        t.cancel()
+    asyncio.run(go())
+    m = cfg.motors[-1]
+    assert m["kind"] == "continuous" and m["commissioned"] and m["bidirectional"]
+    assert "bottom_fs" not in m and not fresh.limits_on()

@@ -162,12 +162,12 @@
           <canvas id="layoutCanvas" aria-label="Top view of axis positions; drag to move"></canvas>
           <div class="table-wrap">
             <table class="grid-table layout-table">
-              <thead><tr><th>#</th><th>Name</th><th>X</th><th>Y</th><th>Trim (mm)</th><th>Travel (mm)</th></tr></thead>
+              <thead><tr><th>#</th><th>Name</th><th>X</th><th>Y</th><th>Mechanism</th><th>Size</th><th>Max speed</th><th>Max accel</th><th>Trim</th><th>Travel</th></tr></thead>
               <tbody id="layoutRows"></tbody>
             </table>
           </div>
         </div>
-        <p class="note">X/Y are plan-view positions (0–1) used by wave, ripple and spin patterns. Trim offsets one axis' height; Travel overrides the default for one axis.</p>
+        <p class="note">X/Y are plan-view positions (0–1) used by wave, ripple and spin patterns. Mechanism and Size are set in Motor Setup (Size = spool diameter mm, screw lead mm, or gear ratio). Max speed/accel are in each motor's units per second (mm, °, rev); blank uses the defaults. Trim offsets one axis; Travel applies until the ends are taught.</p>
         <div class="row gap end"><button class="btn default" id="btnSaveLayout">Apply Layout</button></div>
       </fieldset>
     </div>

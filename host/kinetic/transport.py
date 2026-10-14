@@ -239,6 +239,8 @@ class _SimNode:
         self.link_lost = False
         self.last_seq = 0
         self.jog_target: float | None = None
+        self.vel_mode = False           # continuous rotation: run at target_speed
+        self.target_speed = 0.0
         self.boot_t = time.monotonic()
         self.identify_until = 0.0
         self.enc_boot = int(math.floor(self._unwrapped()))
@@ -281,9 +283,17 @@ class _SimNode:
             self.link_lost = True
             self.target = self.steps
             self.ff = 0.0
+            if self.vel_mode:                   # coast to a stop, then hold
+                self.vel_mode = False
+                self.jog_target = self.steps + math.copysign(self.vel * self.vel / (2 * amax), self.vel)
         goal = self.target if (self.streaming or self.jog_target is None) else self.jog_target
         if not self.enabled:
             self.vel = 0.0
+        elif self.streaming and self.vel_mode:      # continuous rotation, like the firmware's runForward
+            dv = max(-amax * dt, min(amax * dt, max(-vmax, min(vmax, self.target_speed)) - self.vel))
+            self.vel += dv
+            self.steps += self.vel * dt
+            self.target = self.steps
         else:
             err = goal - self.steps
             if self.streaming or self.jog_target is None:
@@ -484,6 +494,22 @@ class SimTransport(Transport):
                 for nd in self.nodes:
                     if nd.id >= len(targets) or nd.homing_until:
                         continue
+                    if targets[nd.id][0] == P.POS_VELOCITY:
+                        # velocity mode: no position needed, but never on a motor with limits
+                        if not (flags & P.FF_ENABLE) or nd.limits_on():
+                            if nd.streaming:
+                                nd.streaming = False
+                                nd.vel_mode = False
+                                nd.target = nd.steps
+                            continue
+                        nd.enabled = nd.streaming = nd.vel_mode = True
+                        nd.link_lost = False
+                        nd.jog_target = None
+                        nd.target_speed = float(targets[nd.id][1])
+                        nd.last_frame = now
+                        nd.last_seq = seq
+                        continue
+                    nd.vel_mode = False
                     if not (flags & P.FF_ENABLE) or not nd.homed:
                         if nd.streaming:
                             nd.streaming = False

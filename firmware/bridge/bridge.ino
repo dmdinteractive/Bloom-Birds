@@ -21,7 +21,7 @@
 #include <esp_arduino_version.h>
 #include "ks_protocol.h"
 
-#define FW_VERSION 2
+#define FW_VERSION 3
 #define ESPNOW_CHANNEL 1      // must match the nodes
 #ifdef LED_BUILTIN
 #define LED_PIN LED_BUILTIN   // change if your board's LED is elsewhere

@@ -98,3 +98,14 @@
   #gauge { display: none; }
 }
 @media (min-height: 800px) { .setup-app { height: 100vh; } }
+
+/* mechanism step */
+.kind-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.kind-grid .pick { min-height: 78px; }
+.kind-grid .p-state { font-size: 13px; color: var(--ink-3); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { min-height: 40px; min-width: 56px; }
+.chip.sel, .seg .sel { border: 2px solid var(--sel-edge); background: #f4f8fc; }
+.seg { display: flex; gap: 6px; }
+.stepper .step-val { min-width: 110px; display: flex; align-items: center; justify-content: center; font-family: var(--mono);
+  background: var(--field); border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); }

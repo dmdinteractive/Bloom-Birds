@@ -116,7 +116,26 @@ Wi-Fi is busy on channel 1, change it to 6 or 11 in **both** sketches.
   ever add one, wire it normally-open between **AUX pin 3 (AUX2)** and **AUX pin 1 (GND)** and
   choose *Limit switch* under Setup → Mechanics → Homing.
 
-## 3a. Motor Setup and position memory (no home switches)
+## 3a. Mechanisms
+
+Each motor has its own mechanism, chosen in the first step of Motor Setup:
+
+| Mechanism | Units | Size setting | Ends taught |
+|---|---|---|---|
+| Cable spool | mm of cable | spool diameter | top / bottom |
+| Linear actuator | mm | lead (mm per motor turn) | home end / far end |
+| Rotary (angle) | degrees | gear ratio | start angle / end angle |
+| Continuous rotation | rev/s | gear ratio | none: the show sets its **speed** |
+
+Motion design always works in 0–1 (0 = home end, 1 = far end), so one clip can drive spools,
+slides and arms at the same time. For continuous rotation, 0–1 is a speed: forward-only motors go
+from stopped (0) to full speed (1); "both directions" motors go from full reverse (0) through
+stopped (0.5) to full forward (1). Per-motor top speed and acceleration are in Setup → Axis Layout.
+
+A board whose ends are taught never free-runs: the firmware refuses speed commands while it has
+soft limits, so a spool can't be spun off its cable by a wrongly set mechanism.
+
+## 3b. Motor Setup and position memory (no home switches)
 
 **Every new or replaced PD Stepper goes through Motor Setup once.** Open it from the touch
 panel (Axes → *Motor Setup*, or tap a *New node* card), from the editor (Axes → *Motor
@@ -309,7 +328,7 @@ Created on first run and edited from the Setup tab.
   library APIs, but it has **not been run on real hardware yet**. Expect some tuning on
   the bench: run current, StallGuard sensitivity, and possibly the tracking gains at the
   top of `node.ino`.
-- **Protocol version 2.** Position memory changed the radio messages. Re-flash **both** the
+- **Protocol version 3.** Speed mode for continuous rotation changed the radio messages (version 2 added position memory). Re-flash **both** the
   bridge and every node. The controller names any node still running old firmware in the
   event log.
 - **The power-loss save is the part most likely to need bench work.** It depends on how
@@ -323,7 +342,7 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 52 automated tests. They include:
+- **Pi software** is covered by 55 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;

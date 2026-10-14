@@ -42,7 +42,7 @@
 #include <FastAccelStepper.h>
 #include "ks_protocol.h"
 
-#define FW_VERSION 2
+#define FW_VERSION 3
 #define ESPNOW_CHANNEL 1   // must match the bridge
 #define FULL_STEPS_PER_REV 200  // 1.8 degree motor
 
@@ -591,6 +591,30 @@ void applyFrame() {
   portEXIT_CRITICAL(&mux);
 
   if (mode == M_HOMING || mode == M_BUTTON) return;   // local operations win
+
+  // Continuous rotation: run at a speed, position doesn't matter. A node with taught limits
+  // (a spool, slide or limited arm) never free-runs, whatever it is sent.
+  if (t.pos == KS_POS_VELOCITY) {
+    if (!(flags & KS_FF_ENABLE) || !powerGood || limitsOn()) {
+      if (mode == M_STREAM) { stepper->stopMove(); mode = M_IDLE; }
+      return;
+    }
+    if (mode == M_JOG) stepper->stopMove();
+    if (mode != M_STREAM) { enableMotor(true); mode = M_STREAM; }
+    everStreamed = true;
+    linkLost = false;
+    int32_t v = constrain(t.vel, -cfg[KS_CFG_MAX_SPEED], cfg[KS_CFG_MAX_SPEED]);
+    stepper->setAcceleration(cfg[KS_CFG_MAX_ACCEL]);
+    if (abs(v) < 2) {
+      stepper->stopMove();
+    } else {
+      stepper->setSpeedInHz((uint32_t)abs(v));
+      if (v > 0) stepper->runForward(); else stepper->runBackward();   // also applies the new speed
+    }
+    lastTarget = stepper->getCurrentPosition();
+    return;
+  }
+
   if (!(flags & KS_FF_ENABLE) || !homed || !powerGood) {
     if (mode == M_STREAM) { stepper->stopMove(); mode = M_IDLE; }
     return;
