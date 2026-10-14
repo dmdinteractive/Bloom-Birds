@@ -96,6 +96,10 @@ class Engine:
         self.entry_index = 0
         self.entry_start = 0.0
         self.solo_clip: str | None = None
+        # an external trigger playing a clip over the show: {"clip", "end", "resume": {...}}
+        self.interrupt: dict | None = None
+        self.triggers = None          # TriggerManager, attached by run.py
+        self.show_rev = 0             # bumps when the active show is switched (editors reload)
         self.seq = 0
         self.disarm_frames = 0
         self.startup = "waiting"
@@ -350,6 +354,7 @@ class Engine:
             return
         self.mode = "playlist"
         self.solo_clip = None
+        self.interrupt = None
         self.entry_index = i
         self._start_entry(first=True)
 
@@ -370,6 +375,9 @@ class Engine:
             self.event(f"Playing \"{clip.get('name', 'clip')}\"")
 
     def next(self):
+        if self.interrupt:                 # Next during a triggered clip: end it and carry on
+            self._resume()
+            return
         if self.mode == "playlist":
             i = self._enabled_index(self.entry_index + 1)
             if i is not None:
@@ -382,6 +390,7 @@ class Engine:
             log.warning("solo: unknown clip %s (have %s)", clip_id, [c["id"] for c in self.show["clips"]])
             return
         self.mode = "solo"
+        self.interrupt = None
         self.solo_clip = clip_id
         self._switch(ClipSource(self, clip_id, self.vclock), max(1.5, float(clip.get("fade", 2))))
         self.event(f"Previewing \"{clip.get('name', 'clip')}\" on loop")
@@ -389,14 +398,75 @@ class Engine:
     def hold(self):
         self.mode = "hold"
         self.solo_clip = None
+        self.interrupt = None
         self._switch(HoldSource(self.last_norm), 0)
 
     def park(self):
         """Wind everything up to home, at the motors' max speed/accel."""
         self.mode = "park"
         self.solo_clip = None
+        self.interrupt = None
         self._switch(HoldSource([0.0] * self.cfg.motor_count), 0)
         self.event("Parking: winding all motors up")
+
+    # ---------------------------------------------------------------- external triggers
+    def play_once(self, clip_id: str, times: int = 1, fade: float | None = None) -> bool:
+        """Play a clip over whatever is running, then go back to it (the playlist resumes
+        where it left off). Triggering again while one is playing restarts the new clip but
+        keeps the original resume point."""
+        clip = self.clip(clip_id)
+        if not clip:
+            self.event("Trigger: that clip is no longer in the show", "warn")
+            return False
+        now = self.vclock
+        if self.interrupt:
+            resume = self.interrupt["resume"]
+        else:
+            resume = {"mode": self.mode, "entry": self.entry_index, "elapsed": now - self.entry_start,
+                      "solo": self.solo_clip, "values": list(self.last_norm),
+                      "clip_t": now - self.source.t0 if isinstance(self.source, ClipSource) else 0.0}
+        length = float(clip.get("duration", 10)) * max(1, int(times))
+        self.interrupt = {"clip": clip_id, "end": now + length, "resume": resume}
+        self.mode = "trigger"
+        self.solo_clip = None
+        f = float(clip.get("fade", 1.5)) if fade is None else float(fade)
+        self._switch(ClipSource(self, clip_id, now), max(0.3, f))
+        self.event(f"Trigger: playing \"{clip.get('name', 'clip')}\" then resuming")
+        return True
+
+    def _resume(self):
+        r = self.interrupt["resume"] if self.interrupt else {"mode": "hold", "values": list(self.last_norm)}
+        self.interrupt = None
+        now, fade = self.vclock, 2.0
+        mode = r["mode"]
+        pl = self.show["playlist"]
+        if mode == "playlist" and pl and r["entry"] < len(pl) and self.clip(pl[r["entry"]]["clip"]):
+            self.mode, self.entry_index = "playlist", r["entry"]
+            self.entry_start = now - r["elapsed"]
+            self._switch(ClipSource(self, pl[r["entry"]]["clip"], self.entry_start), fade)
+        elif mode == "playlist":
+            self.play()
+        elif mode == "solo" and r["solo"] and self.clip(r["solo"]):
+            self.mode, self.solo_clip = "solo", r["solo"]
+            self._switch(ClipSource(self, r["solo"], now - r["clip_t"]), fade)
+        elif mode == "park":
+            self.park()
+        else:                              # hold / idle: go back to where it was standing
+            self.mode = mode
+            self._switch(HoldSource(r["values"]), fade)
+        self.event("Trigger finished: resumed")
+
+    def switch_show(self, name: str | None = None, entry: int = 0):
+        """Load another show (if a name is given) and run its playlist from `entry` (0-based)."""
+        if name and name != self.show.get("name"):
+            if name not in self.list_shows():
+                self.event(f"Trigger: no show called \"{name}\"", "warn")
+                return
+            self.load_show(name)
+            self.show_rev += 1
+            self.cfg.save()
+            self.event(f"Switched to show \"{name}\"")
+        self.play(max(0, int(entry)))
 
     def arm(self, on: bool):
         if on and self.wizard:
@@ -447,13 +517,15 @@ class Engine:
         return {"speed": M.clamp(float(pb.get("speed", 1.0)), 0.25, 2.0),
                 "depth": M.clamp(float(pb.get("depth", 1.0)), 0.1, 1.0)}
 
-    def set_playback(self, speed: float | None = None, depth: float | None = None):
+    def set_playback(self, speed: float | None = None, depth: float | None = None, save: bool = True):
         pb = self.playback
         if speed is not None:
             pb["speed"] = round(M.clamp(float(speed), 0.25, 2.0), 3)
         if depth is not None:
             pb["depth"] = round(M.clamp(float(depth), 0.1, 1.0), 3)
         self.cfg.data["playback"] = pb
+        if not save:                    # live control from a fader: no disk write, no log line
+            return
         self.cfg.save()
         self.event(f"Playback set to speed {pb['speed'] * 100:.0f}%, depth {pb['depth'] * 100:.0f}%")
 
@@ -465,6 +537,8 @@ class Engine:
         self.limiter.vmax = [self.cfg.vmax(i) for i in range(n)]
         self.limiter.amax = [self.cfg.amax(i) for i in range(n)]
 
+        if self.interrupt and now >= self.interrupt["end"]:
+            self._resume()
         if self.mode == "playlist" and self.show["playlist"]:
             pl = self.show["playlist"]
             entry = pl[self.entry_index % len(pl)]
@@ -1189,6 +1263,10 @@ class Engine:
             "actual_mm": [None if a is None else round(a, 1) for a in self.actual_mm()],
             "nodes": nodes, "bridge": bridge, "link": self.tx.connected, "port": self.tx.port_name,
             "fading": self.fade_from is not None,
+            "show": self.show.get("name"), "show_rev": self.show_rev,
+            "interrupt": None if not self.interrupt else {
+                "clip": self.interrupt["clip"], "left": round(max(0.0, self.interrupt["end"] - vnow), 1)},
+            "triggers": self.triggers.snapshot() if self.triggers else None,
             "travel": [round(self.cfg.travel(i), 1) for i in range(self.cfg.motor_count)],
             "commissioned": [bool(m.get("commissioned")) for m in self.cfg.motors],
             "setup_macs": [m.get("node_mac") for m in self.cfg.motors],

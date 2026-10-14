@@ -42,6 +42,7 @@
   <button class="tab active" data-tab="design" role="tab">Motion Design</button>
   <button class="tab" data-tab="motors" role="tab">Axes</button>
   <button class="tab" data-tab="settings" role="tab">Setup</button>
+  <button class="tab" data-tab="triggers" role="tab">Triggers</button>
 </nav>
 
 <main>
@@ -178,6 +179,61 @@
           <span class="spacer"></span><button class="btn default" id="btnSaveGroups">Apply Groups</button></div>
         <p class="note">Groups (e.g. left wing / right wing, flock A / flock B) can be the target of a clip or of a layer
           in a layered clip, so different parts of the sculpture can do different things at the same time.</p>
+      </fieldset>
+    </div>
+  </section>
+
+  <!-- ================= external triggers ================= -->
+  <section class="view" id="view-triggers">
+    <div class="trig-grid">
+      <fieldset class="group">
+        <legend>OSC <span class="legend-note trig-status" data-st="osc"></span></legend>
+        <div class="prop-grid trig-in">
+          <label class="p-lab" for="t_osc_on">Listen for OSC</label><span class="p-val"><input type="checkbox" id="t_osc_on" data-tin="osc.enabled"></span>
+          <label class="p-lab" for="t_osc_port">UDP port</label><span class="p-val"><input type="number" class="num" id="t_osc_port" data-tin="osc.port" min="1024" max="65535"></span>
+        </div>
+        <p class="note" id="oscHelp">From TouchOSC, QLab, Max, a show controller… Messages like <code>/bloom/flap 1</code>.</p>
+      </fieldset>
+      <fieldset class="group">
+        <legend>MIDI <span class="legend-note trig-status" data-st="midi"></span></legend>
+        <div class="prop-grid trig-in">
+          <label class="p-lab" for="t_midi_on">Listen for MIDI</label><span class="p-val"><input type="checkbox" id="t_midi_on" data-tin="midi.enabled"></span>
+          <label class="p-lab">Devices found</label><span id="midiDevs" class="p-val sub">—</span>
+        </div>
+        <p class="note">Plug a USB MIDI controller into the Pi. Every connected device is read; notes, CCs and program changes.</p>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Art-Net / DMX <span class="legend-note trig-status" data-st="artnet"></span></legend>
+        <div class="prop-grid trig-in">
+          <label class="p-lab" for="t_an_on">Listen for Art-Net</label><span class="p-val"><input type="checkbox" id="t_an_on" data-tin="artnet.enabled"></span>
+          <label class="p-lab" for="t_an_uni">Universe</label><span class="p-val"><input type="number" class="num" id="t_an_uni" data-tin="artnet.universe" min="0" max="32767"></span>
+        </div>
+        <p class="note">From a lighting console on the network (UDP 6454). Universe is the 15-bit Art-Net port-address (0 = first). Channels 1–512.</p>
+      </fieldset>
+      <fieldset class="group">
+        <legend>Pi GPIO <span class="legend-note trig-status" data-st="gpio"></span></legend>
+        <div class="prop-grid trig-in">
+          <label class="p-lab" for="t_gp_on">Watch GPIO pins</label><span class="p-val"><input type="checkbox" id="t_gp_on" data-tin="gpio.enabled"></span>
+        </div>
+        <div id="gpioPins"></div>
+        <div class="row gap mb"><button class="btn small" id="btnAddPin">Add Pin</button></div>
+        <p class="note">Pin numbers are GPIO (BCM) numbers, not header positions. A button goes between the pin and GND.
+          Sensors (PIR, beam break) must output 3.3 V, never 5 V.</p>
+      </fieldset>
+      <fieldset class="group span2">
+        <legend>Mappings</legend>
+        <div class="table-wrap"><div id="trigMaps"></div></div>
+        <div class="row gap mb"><button class="btn" id="btnAddMap">Add Mapping</button><span class="spacer"></span>
+          <button class="btn default" id="btnSaveTrig">Apply Triggers</button></div>
+        <p class="note"><b>Learn</b> waits for the next input that arrives and fills it in: press it, then hit the button, move
+          the fader or send the message. Fire actions happen when the value rises past half (once per press);
+          speed and intensity follow the value continuously. A note without a channel (<code>note 60</code>) matches any channel.
+          Operator buttons (Run, Hold, Next…) always override a triggered clip.</p>
+      </fieldset>
+      <fieldset class="group span2">
+        <legend>Input Monitor <span class="legend-note">latest value from each input</span></legend>
+        <div class="table-wrap"><table class="grid-table"><thead><tr><th>Input</th><th>Address</th><th class="r">Value</th><th class="r">Ago</th></tr></thead>
+          <tbody id="trigRecent"></tbody></table></div>
       </fieldset>
     </div>
   </section>

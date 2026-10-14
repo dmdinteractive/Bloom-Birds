@@ -7,6 +7,8 @@
   POST /api/show/load     {"name": ...}
   PUT  /api/config        update installation settings (mechanics, motors, startup)
   POST /api/render        {"clip": {...}} -> sampled motion for the editor graphs
+  GET  /api/triggers      external trigger settings, input status, MIDI devices
+  PUT  /api/triggers      save trigger settings and restart the inputs
   GET  /ws                websocket: 20 Hz state out, commands in
 """
 from __future__ import annotations
@@ -24,6 +26,7 @@ from . import motion as M
 from . import protocol as P
 from .config import KINDS, relayout_motors
 from .engine import Engine
+from . import triggers as T
 
 log = logging.getLogger("kinetic.server")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -61,6 +64,10 @@ def create_app(engine: Engine) -> web.Application:
 
     async def put_show(req):
         show = await req.json()
+        if show.get("name") and show.get("name") != engine.show.get("name"):
+            # the active show was switched (by a trigger or another screen) after this editor
+            # loaded it: don't let a late save overwrite the new one
+            return web.json_response({"error": f"The active show is now \"{engine.show.get('name')}\""}, status=409)
         engine.save_show(show)
         return web.json_response({"ok": True})
 
@@ -75,6 +82,7 @@ def create_app(engine: Engine) -> web.Application:
         body = await req.json()
         engine.hold()
         engine.load_show(body["name"])
+        engine.show_rev += 1
         engine.cfg.save()
         return web.json_response({"ok": True, "show": engine.show})
 
@@ -119,6 +127,22 @@ def create_app(engine: Engine) -> web.Application:
         except Exception as e:  # noqa: BLE001
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response(data)
+
+    def triggers_info() -> dict:
+        tm = engine.triggers
+        return {"config": tm.cfg if tm else T.DEFAULTS, "actions": T.ACTIONS, "sources": T.SOURCES,
+                "status": tm.status if tm else {}, "midi_devices": T.midi_devices(),
+                "shows": engine.list_shows(), "available": tm is not None}
+
+    async def get_triggers(_req):
+        return web.json_response(triggers_info())
+
+    async def put_triggers(req):
+        if not engine.triggers:
+            return web.json_response({"error": "triggers are not running"}, status=503)
+        engine.triggers.update(await req.json())
+        await engine.triggers.apply()
+        return web.json_response(triggers_info())
 
     async def ws_handler(req):
         ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
@@ -170,6 +194,8 @@ def create_app(engine: Engine) -> web.Application:
     app.router.add_post("/api/show/load", load)
     app.router.add_put("/api/config", put_config)
     app.router.add_post("/api/render", render)
+    app.router.add_get("/api/triggers", get_triggers)
+    app.router.add_put("/api/triggers", put_triggers)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/static", WEB_DIR)
     app.cleanup_ctx.append(broadcaster)
@@ -198,6 +224,12 @@ def handle_command(engine: Engine, msg: dict):
         engine.play()
     elif c == "play_entry":
         engine.play_entry(int(msg["index"]))
+    elif c == "trigger_learn" and engine.triggers:
+        engine.triggers.learn = msg.get("id") or None
+    elif c == "trigger_test" and engine.triggers:
+        engine.triggers.test(str(msg["id"]))
+    elif c == "trigger_inject" and engine.triggers:      # pretend an input arrived (testing)
+        engine.triggers.handle(str(msg["source"]), str(msg["address"]), float(msg.get("value", 1.0)))
     elif c == "set_playback":
         engine.set_playback(msg.get("speed"), msg.get("depth"))
     elif c == "next":

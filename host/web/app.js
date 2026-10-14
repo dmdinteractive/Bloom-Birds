@@ -74,6 +74,13 @@ function connectWs() {
       const prevClip = S.tick?.clip, prevMode = S.tick?.mode, prevEntry = S.tick?.entry;
       S.tick = m;
       if (m.events) addEvents(m.events);
+      // the active show was switched (by an external trigger or another screen): load it
+      if (S.showRev !== undefined && m.show_rev !== S.showRev && !S.reloading) {
+        if (S.show && m.show !== S.show.name) toast(`Show switched to "${m.show}"`);
+        S.reloading = true; loadState().finally(() => { S.reloading = false; });
+      }
+      S.showRev = m.show_rev;
+      if (m.triggers) renderTrigLive(m.triggers);
       // motors added or removed (here or on another screen): reload the motor list once
       if (S.config && m.travel && m.travel.length !== S.config.motors.length && !S.reloading) {
         S.reloading = true; loadState().finally(() => { S.reloading = false; });
@@ -938,7 +945,7 @@ function bezierHandles(c, g) {
 })();
 
 // ------------------------------------------------------------ title bar, toolbar, status bar
-const MODE_LABEL = { idle: "IDLE", playlist: "SHOW", solo: "PREVIEW", hold: "HOLD", park: "PARK" };
+const MODE_LABEL = { idle: "IDLE", playlist: "SHOW", solo: "PREVIEW", hold: "HOLD", park: "PARK", trigger: "TRIGGER" };
 function renderStatus() {
   const tk = S.tick;
   const ind = [];
@@ -958,8 +965,8 @@ function renderStatus() {
     // toolbar readouts
     const c = clipById(tk.clip);
     $("#roMode").textContent = MODE_LABEL[tk.mode] || tk.mode.toUpperCase();
-    $("#roClip").textContent = c && (tk.mode === "playlist" || tk.mode === "solo") ? c.name + (tk.fading ? " (fade)" : "") : "—";
-    $("#roTime").textContent = c && (tk.mode === "playlist" || tk.mode === "solo") ? `${fmtTimeTenths(tk.clip_t % c.duration)}` : "—";
+    $("#roClip").textContent = c && ["playlist", "solo", "trigger"].includes(tk.mode) ? c.name + (tk.fading ? " (fade)" : "") : "—";
+    $("#roTime").textContent = c && ["playlist", "solo", "trigger"].includes(tk.mode) ? `${fmtTimeTenths(tk.clip_t % c.duration)}` : "—";
 
     // enable button
     const b = $("#btnEnable");
@@ -1308,10 +1315,143 @@ function drawLayout() {
   cv.addEventListener("pointerup", () => { if (S.layoutDrag !== null) { S.layoutDrag = null; renderLayoutTable(); } });
 })();
 
+// ------------------------------------------------------------ external triggers (Triggers tab)
+// T.cfg is the editor's working copy of config.triggers; Apply sends it to the Pi, which
+// restarts the inputs. The 20 Hz tick carries each input's status and the latest values.
+const T = { info: null, cfg: null, dirty: false, learnWas: null };
+const rid = () => Math.random().toString(16).slice(2, 10);
+const ADDR_HINT = { osc: "/bloom/flap", midi: "ch 1 note 60", artnet: "ch 1", gpio: "pin 17" };
+const WIRING = { button: "Button to GND", high: "Sensor, active high", low: "Sensor, active low" };
+const getPath = (o, p) => p.split(".").reduce((a, k) => a?.[k], o);
+function setPath(o, p, v) { const ks = p.split("."), last = ks.pop(); ks.reduce((a, k) => (a[k] ??= {}), o)[last] = v; }
+
+async function loadTriggers() {
+  T.info = await api("GET", "/api/triggers");
+  T.cfg = JSON.parse(JSON.stringify(T.info.config)); T.dirty = false;
+  renderTriggers();
+}
+function renderTriggers() {
+  if (!T.cfg) return;
+  $$("[data-tin]").forEach((el) => { const v = getPath(T.cfg, el.dataset.tin); if (el.type === "checkbox") el.checked = !!v; else el.value = v ?? ""; });
+  const devs = T.info.midi_devices || [];
+  $("#midiDevs").textContent = devs.length ? devs.map((d) => d.name).join(", ") : "none right now";
+  $("#oscHelp").innerHTML = `Send to <code>${esc(location.hostname)}</code> port <code>${+T.cfg.osc.port || 9000}</code> from TouchOSC, QLab, Max, a show controller… e.g. <code>/bloom/flap 1</code>. A number after the address is the value (none = 1).`;
+  renderPins(); renderMaps(); renderTrigStatus(T.info.status);
+}
+function renderPins() {
+  const pins = T.cfg.gpio.pins || [];
+  $("#gpioPins").innerHTML = !pins.length ? `<p class="note">No pins yet.</p>` :
+    `<table class="grid-table trig-table"><thead><tr><th>GPIO</th><th>Wiring</th><th>Name</th><th></th></tr></thead><tbody>` +
+    pins.map((p, i) => `<tr><td><input type="number" class="num" data-pin="${i}" data-pf="pin" min="0" max="27" value="${p.pin}" aria-label="GPIO number"></td>
+      <td><select data-pin="${i}" data-pf="wiring">${Object.entries(WIRING).map(([k, v]) => `<option value="${k}" ${k === (p.wiring || "button") ? "selected" : ""}>${v}</option>`).join("")}</select></td>
+      <td><input type="text" data-pin="${i}" data-pf="name" value="${esc(p.name || "")}" placeholder="e.g. Lobby button"></td>
+      <td><button class="btn small" data-pdel="${i}">Delete</button></td></tr>`).join("") + `</tbody></table>`;
+}
+function mapOptions(m, i) {
+  const a = T.info.actions[m.action] || {}, f = (k, v) => `data-map="${i}" data-mf="${k}" value="${v}"`;
+  if (m.action === "play_clip") {
+    return `<select data-map="${i}" data-mf="clip" aria-label="Clip"><option value="">— pick a clip —</option>${S.show.clips.map((c) =>
+      `<option value="${c.id}" ${c.id === m.clip ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+      play <input type="number" class="num" min="1" max="20" ${f("times", m.times || 1)}> ×`;
+  }
+  if (m.action === "switch") {
+    return `<select data-map="${i}" data-mf="show" aria-label="Show"><option value="">(the current show)</option>${(T.info.shows || []).map((n) =>
+      `<option value="${esc(n)}" ${n === m.show ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
+      from entry <input type="number" class="num" min="1" max="99" ${f("entry", m.entry || 1)}>`;
+  }
+  if (a.kind === "level") {
+    const pc = (v) => Math.round(v * 100);
+    return `0 → <input type="number" class="num" step="5" ${f("lo", pc(m.lo ?? a.lo))}>% &nbsp; full → <input type="number" class="num" step="5" ${f("hi", pc(m.hi ?? a.hi))}>%`;
+  }
+  return "";
+}
+function renderMaps() {
+  const maps = T.cfg.mappings || [];
+  if (!maps.length) { $("#trigMaps").innerHTML = `<p class="note">No mappings yet. Add one, then press Learn and use your button, fader or message.</p>`; return; }
+  $("#trigMaps").innerHTML = `<table class="grid-table trig-table"><thead><tr><th class="c">On</th><th>Name</th><th>Input</th><th>Action</th><th>Options</th><th class="c">Ignore repeats</th><th></th></tr></thead><tbody>` +
+    maps.map((m, i) => {
+      const learning = S.tick?.triggers?.learn === m.id, fire = (T.info.actions[m.action] || {}).kind !== "level";
+      return `<tr>
+      <td class="c"><input type="checkbox" data-map="${i}" data-mf="enabled" ${m.enabled !== false ? "checked" : ""} aria-label="Mapping on"></td>
+      <td><input type="text" data-map="${i}" data-mf="name" value="${esc(m.name || "")}" placeholder="Name"></td>
+      <td><div class="addr"><select data-map="${i}" data-mf="source" aria-label="Input type">${Object.entries(T.info.sources).map(([k, v]) =>
+        `<option value="${k}" ${k === m.source ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <input type="text" data-map="${i}" data-mf="address" value="${esc(m.address || "")}" placeholder="${ADDR_HINT[m.source] || ""}" aria-label="Address">
+        <button class="btn small ${learning ? "learning" : ""}" data-learn="${m.id}">${learning ? "Listening…" : "Learn"}</button></div></td>
+      <td><select data-map="${i}" data-mf="action" aria-label="Action">${Object.entries(T.info.actions).map(([k, v]) =>
+        `<option value="${k}" ${k === m.action ? "selected" : ""}>${v.label}</option>`).join("")}</select></td>
+      <td><div class="opts">${mapOptions(m, i)}</div></td>
+      <td class="c">${fire ? `<input type="number" class="num" step="0.5" min="0" data-map="${i}" data-mf="cooldown" value="${m.cooldown ?? 0.5}" aria-label="Ignore repeats for seconds"> s` : "—"}</td>
+      <td><button class="btn small" data-test="${m.id}">Test</button> <button class="btn small" data-mdel="${i}">Delete</button></td></tr>`;
+    }).join("") + `</tbody></table>`;
+}
+function renderTrigStatus(st) {
+  for (const el of $$(".trig-status")) {
+    const v = st?.[el.dataset.st] || "off";
+    el.textContent = `· ${v}`;
+    el.classList.toggle("on", /^(listening|watching)/.test(v));
+    el.classList.toggle("err", /^(error|not available)/.test(v));
+  }
+}
+function renderTrigLive(tr) {
+  if (!$("#view-triggers").classList.contains("active")) { T.learnWas = tr.learn; return; }
+  renderTrigStatus(tr.status);
+  const src = T.info?.sources || {};
+  $("#trigRecent").innerHTML = tr.recent.length ? tr.recent.map((r) => `<tr class="${r.age < 1 ? "fresh" : ""}"><td>${esc(src[r.source] || r.source)}</td>
+    <td class="mono">${esc(r.address)}</td><td class="r">${r.value.toFixed(3)}</td><td class="r">${r.age < 60 ? r.age.toFixed(0) + " s" : "—"}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="sub">Nothing received yet. Switch an input on, Apply, then press a button or send a message.</td></tr>`;
+  if (T.learnWas && !tr.learn) loadTriggers().then(() => toast("Learned"));       // learn finished on the Pi
+  else if ((T.learnWas || null) !== (tr.learn || null)) renderMaps();
+  T.learnWas = tr.learn;
+}
+async function saveTriggers(quiet = false) {
+  try {
+    T.info = await api("PUT", "/api/triggers", T.cfg);
+    T.cfg = JSON.parse(JSON.stringify(T.info.config)); T.dirty = false;
+    renderTriggers(); if (!quiet) toast("Triggers applied");
+    return true;
+  } catch (e) { toast("Could not apply: " + e.message, true); return false; }
+}
+$("#view-triggers").addEventListener("input", (ev) => {
+  const t = ev.target, val = t.type === "checkbox" ? t.checked : t.type === "number" ? (t.value === "" ? "" : +t.value) : t.value;
+  if (!T.cfg) return;
+  if (t.dataset.tin) setPath(T.cfg, t.dataset.tin, val);
+  else if (t.dataset.pin !== undefined) T.cfg.gpio.pins[+t.dataset.pin][t.dataset.pf] = val;
+  else if (t.dataset.map !== undefined) {
+    const m = T.cfg.mappings[+t.dataset.map], f = t.dataset.mf;
+    m[f] = (f === "lo" || f === "hi") && val !== "" ? val / 100 : val;
+    if (f === "action") { delete m.lo; delete m.hi; renderMaps(); }
+    if (f === "source") renderMaps();
+  } else return;
+  T.dirty = true;
+});
+$("#view-triggers").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("button"); if (!b || !T.cfg) return;
+  if (b.id === "btnAddPin") { T.cfg.gpio.pins.push({ pin: 17, wiring: "button", name: "" }); T.dirty = true; renderPins(); }
+  else if (b.id === "btnAddMap") {
+    T.cfg.mappings.push({ id: rid(), name: "", enabled: true, source: T.cfg.midi.enabled ? "midi" : T.cfg.gpio.enabled ? "gpio" : T.cfg.artnet.enabled ? "artnet" : "osc",
+      address: "", action: "play_clip", clip: S.show.clips[0]?.id || "", times: 1, cooldown: 0.5 });
+    T.dirty = true; renderMaps();
+  }
+  else if (b.id === "btnSaveTrig") saveTriggers();
+  else if (b.dataset.pdel !== undefined) { T.cfg.gpio.pins.splice(+b.dataset.pdel, 1); T.dirty = true; renderPins(); }
+  else if (b.dataset.mdel !== undefined) { T.cfg.mappings.splice(+b.dataset.mdel, 1); T.dirty = true; renderMaps(); }
+  else if (b.dataset.learn) {
+    if (S.tick?.triggers?.learn === b.dataset.learn) { send("trigger_learn", { id: null }); return; }
+    if (T.dirty && !(await saveTriggers(true))) return;        // the Pi needs the mapping before it can fill it in
+    send("trigger_learn", { id: b.dataset.learn });
+  }
+  else if (b.dataset.test) {
+    if (T.dirty && !(await saveTriggers(true))) return;
+    send("trigger_test", { id: b.dataset.test });
+  }
+});
+
 // ------------------------------------------------------------ tabs + frame loop
 $$(".tab").forEach((b) => b.addEventListener("click", () => {
   $$(".tab").forEach((x) => x.classList.toggle("active", x === b));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${b.dataset.tab}`));
+  if (b.dataset.tab === "triggers" && !T.dirty) loadTriggers().catch((e) => toast(e.message, true));
 }));
 
 let lastSlow = 0;

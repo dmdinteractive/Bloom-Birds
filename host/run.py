@@ -25,6 +25,7 @@ from aiohttp import web
 from kinetic.config import Config, relayout_motors
 from kinetic.engine import Engine
 from kinetic.server import create_app
+from kinetic.triggers import TriggerManager
 from kinetic.transport import SerialTransport, SimTransport
 
 HERE = Path(__file__).resolve().parent
@@ -106,6 +107,9 @@ async def main():
                 loop.add_signal_handler(sig, stop.set)
             except (NotImplementedError, RuntimeError):
                 pass
+    # external triggers (OSC, MIDI, Art-Net, GPIO): only the inputs switched on in the editor start
+    engine.triggers = TriggerManager(engine)
+    await engine.triggers.start()
     runner_task = asyncio.create_task(engine.run())
     if not args.no_autostart:
         asyncio.create_task(engine.autostart())
@@ -113,6 +117,7 @@ async def main():
         await asyncio.wait([runner_task, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
     finally:
         logging.info("Shutting down")
+        engine.triggers.stop()
         transport.stop()
         await runner.cleanup()
 

@@ -338,6 +338,65 @@ Shows are saved as JSON files in `host/shows/`. Use **Save as…** to keep versi
 
 ---
 
+## External triggers
+
+The editor's **Triggers** tab lets things outside the controller change what the sculpture
+does: a visitor button, a motion sensor, a lighting console, a MIDI controller, or a show
+control system. Each input is off until you switch it on and press **Apply Triggers**.
+
+| Input | What to connect | Address looks like | Value |
+|---|---|---|---|
+| **OSC** | Anything that sends OSC over the network (TouchOSC, QLab, Max, Companion…) to the Pi's address, port 9000 by default | `/bloom/flap` | first number after the address (none = 1) |
+| **MIDI** | A USB MIDI controller plugged into the Pi | `ch 1 note 60`, `ch 1 cc 7`, `ch 1 program 5` | velocity or CC ÷ 127 |
+| **Art-Net / DMX** | A lighting console on the network sending Art-Net to the Pi (UDP 6454) | `ch 12` (in the chosen universe) | level ÷ 255 |
+| **Pi GPIO** | A button between a GPIO pin and GND, or a sensor's 3.3 V output | `pin 17` | 1 pressed, 0 released |
+
+A **mapping** connects one input to one action:
+
+- **Play a clip, then resume:** plays a clip over the show (once, or N times), then fades back
+  into the playlist at the exact point it left. Triggering again while it plays restarts that
+  clip but still returns to the original point.
+- **Switch show / playlist entry:** loads another saved show (or stays in this one) and runs
+  its playlist from the chosen entry. Open editors and the touch panel reload automatically.
+- **Live speed** and **Live intensity (depth):** follow a fader, CC or DMX channel
+  continuously between the two percentages you set. These are not saved to disk on every move.
+- **Run show, Next clip, Hold, Park:** the same as the operator buttons.
+
+How it behaves:
+
+- **Learn:** press Learn on a mapping, then press the button / move the fader / send the
+  message. The address fills itself in.
+- **Fire actions** (everything except speed and intensity) happen when the value rises past
+  half, so a held button or a sensor that stays on fires once. **Ignore repeats** sets how
+  long after firing a mapping ignores new presses.
+- A MIDI address without a channel (`note 60`) matches that note on any channel.
+- The **Input Monitor** shows the latest value from every input that has sent anything, which
+  is the quickest way to find out what a controller actually sends.
+- Operator buttons (Run Show, Hold, Next, Park) always override a triggered clip.
+- Triggers never **enable** the motors: if the controller is disabled, the show changes on
+  screen only.
+
+Pi setup for triggers (once): re-run the installer so the controller can use the GPIO
+libraries that ship with Raspberry Pi OS, and so its user is in the `audio` (MIDI) and `gpio`
+groups:
+
+```bash
+cd ~/Bloom-Birds && git pull && cd host && bash deploy/install_pi.sh
+```
+
+Notes:
+
+- GPIO numbers are the chip's **GPIO (BCM)** numbers, not the header pin positions. The Pi's
+  pins are **3.3 V only**; a 5 V sensor needs a level shifter or a voltage divider.
+- OSC and Art-Net have no passwords. Anyone on the same network can send them, so keep the
+  sculpture on its own network or VLAN in public spaces.
+- On a Mac (simulator), OSC and Art-Net work; MIDI needs `pip install mido python-rtmidi`;
+  GPIO is Pi-only.
+
+References: [OSC 1.0 specification](https://opensoundcontrol.stanford.edu/spec-1_0.html),
+[Art-Net (Artistic Licence)](https://art-net.org.uk/), [Art-Net packet layout](https://en.wikipedia.org/wiki/Art-Net),
+[GPIO Zero installation (virtual environments, lgpio)](https://gpiozero.readthedocs.io/en/stable/installing.html).
+
 ## Settings reference (`host/config.json`)
 
 Created on first run and edited from the Setup tab.
@@ -374,13 +433,18 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 67 automated tests. They include:
+- **Pi software** is covered by 78 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;
   - a single board rebooting mid-show;
   - limit enforcement;
   - a complete Motor Setup run on a simulated board wired backwards with its magnet flipped.
+  - the OSC, Art-Net and MIDI decoders, trigger mapping rules, and "play a clip then
+    resume" returning to the exact playlist position.
+- **External triggers:** OSC and Art-Net were tested with real network packets. The MIDI
+  reader (Linux raw MIDI) and GPIO (gpiozero) code paths have **not been run on the Pi
+  yet**. Check them with the Input Monitor when you first plug in a controller or button.
 - **Spool diameter:** if cable stacks in several layers, the effective diameter grows as it
   winds, so positions drift slightly with height. A wide spool with a single layer avoids
   this.

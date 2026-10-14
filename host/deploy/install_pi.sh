@@ -8,14 +8,19 @@ USER_NAME="$(whoami)"
 
 echo "Installing into $DIR for user $USER_NAME"
 sudo apt-get update
-sudo apt-get install -y python3-venv
+# python3-gpiozero + python3-lgpio: buttons and sensors on the GPIO header (external triggers)
+sudo apt-get install -y python3-venv python3-gpiozero python3-lgpio
 
-python3 -m venv "$DIR/.venv"
+# --system-site-packages lets the private environment use the GPIO libraries installed above
+# (re-running this script on an older install switches the existing environment over)
+python3 -m venv --system-site-packages "$DIR/.venv"
 "$DIR/.venv/bin/pip" install --upgrade pip
 "$DIR/.venv/bin/pip" install -r "$DIR/requirements.txt"
 
 # serial port access for the USB bridge
 sudo usermod -aG dialout "$USER_NAME"
+# USB MIDI controllers (audio) and the GPIO header (gpio), for external triggers
+sudo usermod -aG audio,gpio "$USER_NAME"
 
 sed -e "s#__DIR__#$DIR#g" -e "s#__USER__#$USER_NAME#g" "$DIR/deploy/kinetic.service" | sudo tee /etc/systemd/system/kinetic.service > /dev/null
 sudo systemctl daemon-reload

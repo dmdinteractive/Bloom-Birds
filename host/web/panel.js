@@ -66,6 +66,11 @@ function connectWs() {
     const m = JSON.parse(ev.data);
     if (m.type === "tick") {
       P.tick = m; if (m.events) addEvents(m.events);
+      // the show was switched (by an external trigger or the editor): reload it
+      if (P.showRev !== undefined && m.show_rev !== P.showRev && !P.reloading) {
+        P.reloading = true; loadState().finally(() => { P.reloading = false; });
+      }
+      P.showRev = m.show_rev;
       if (P.config && m.travel && m.travel.length !== P.config.motors.length && !P.reloading) {   // motors added/removed
         P.reloading = true; loadState().then(() => { P.cardsKey = ""; P.actionsKey = ""; }).finally(() => { P.reloading = false; });
       }
@@ -117,7 +122,7 @@ const slotFault = (i) => (isEmptySlot(i) ? "" : nodeFault(nodeFor(i)));
 const nodeFor = (i) => (P.tick?.nodes || []).find((nd) => nd.online && nd.id === i) || (P.tick?.nodes || []).find((nd) => nd.id === i);
 
 // ------------------------------------------------------------ top bar + status
-const MODE = { idle: "IDLE", playlist: "SHOW RUNNING", solo: "PREVIEW (LOOPING ONE CLIP)", hold: "HOLDING", park: "PARKING" };
+const MODE = { idle: "IDLE", playlist: "SHOW RUNNING", solo: "PREVIEW (LOOPING ONE CLIP)", hold: "HOLDING", park: "PARKING", trigger: "TRIGGERED CLIP" };
 function renderTop() {
   const tk = P.tick;
   const L = [`<span class="light">${led(P.wsOk ? "on" : "bad")}Controller</span>`];
@@ -157,7 +162,7 @@ function renderRun() {
   const tk = P.tick; if (!tk) return;
   const c = clipById(tk.clip);
   $("#nowMode").textContent = MODE[tk.mode] || tk.mode.toUpperCase();
-  $("#nowClip").textContent = c && (tk.mode === "playlist" || tk.mode === "solo") ? c.name : "—";
+  $("#nowClip").textContent = c && (tk.mode === "playlist" || tk.mode === "solo" || tk.mode === "trigger") ? c.name : "—";
   let frac = 0, time = "—", next = "";
   if (tk.mode === "playlist" && P.show.playlist.length) {
     const e = P.show.playlist[tk.entry % P.show.playlist.length];
@@ -169,6 +174,8 @@ function renderRun() {
       const n = pl[(tk.entry + k) % pl.length];
       if (n.enabled !== false && clipById(n.clip)) { next = `Next: ${clipById(n.clip).name}`; break; }
     }
+  } else if (tk.mode === "trigger" && c && tk.interrupt) {
+    frac = clamp(1 - tk.interrupt.left / c.duration, 0, 1); time = `${fmtTime(tk.interrupt.left)} left`; next = "Then back to the show";
   } else if (tk.mode === "solo" && c) {
     frac = (tk.clip_t % c.duration) / c.duration; time = `${fmtTime(tk.clip_t % c.duration)} / ${fmtTime(c.duration)}`;
   }

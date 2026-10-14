@@ -25,7 +25,7 @@ It doesn't touch the rest of your Mac. To remove it, delete that folder.
 |---|---|
 | **Start Simulator.command** | Asks how many motors (default 5), then runs with **simulated** PD Steppers. Opens the editor and the touch panel in your browser. No hardware needed. |
 | **Start with Bridge.command** | Runs with the **real** ESP-NOW bridge plugged into the Mac's USB, driving real PD Steppers. |
-| **Run Tests.command** | Runs the 67 automated tests (motion math, radio protocol, simulated power-up). |
+| **Run Tests.command** | Runs the 78 automated tests (motion math, radio protocol, simulated power-up). |
 
 To stop, press **Ctrl+C** in the Terminal window, or close it. On real hardware, the motors
 stop within 0.3 s once frames stop arriving.
