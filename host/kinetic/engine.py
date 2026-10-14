@@ -59,7 +59,7 @@ class ClipSource:
         clip = self.engine.clip(self.clip_id)
         if clip is None:
             return self.engine.last_norm
-        return M.eval_clip(clip, now - self.t0, self.engine.cfg.motors)
+        return M.eval_clip(clip, now - self.t0, self.engine.cfg.motors, self.engine.eval_ctx())
 
 
 class HoldSource:
@@ -270,6 +270,11 @@ class Engine:
         self.send_cmd(P.C_STOP)
 
     # ================================================================ show management
+    def eval_ctx(self) -> dict:
+        """What clips need besides time: motor groups and the clip library (for layered clips)."""
+        groups = {g["name"]: g.get("motors", []) for g in self.cfg.data.get("groups", []) if g.get("name")}
+        return {"groups": groups, "clips": {c["id"]: c for c in self.show.get("clips", [])}}
+
     def clip(self, clip_id: str) -> dict | None:
         for c in self.show.get("clips", []):
             if c["id"] == clip_id:
@@ -658,6 +663,10 @@ class Engine:
                     self.send_cmd(P.C_SET_ID, mac=nd["mac"], args=[P.ID_UNASSIGNED])
             self.cfg.motors.pop(i)
             self._shift_show(remove_at=i)
+        # groups: drop removed motors, shift the numbers after them
+        removed_set = set(ids)
+        for g in self.cfg.data.get("groups", []):
+            g["motors"] = sorted({j - sum(1 for r in removed_set if r < j) for j in g.get("motors", []) if j not in removed_set})
         # renumber the rest, and tell each remaining board its (possibly new) number
         old_ids = [m["id"] for m in self.cfg.motors]
         for new_id, m in enumerate(self.cfg.motors):

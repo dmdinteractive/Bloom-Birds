@@ -491,3 +491,12 @@ def test_wizard_for_continuous_motor_skips_limits(rig):
     m = cfg.motors[-1]
     assert m["kind"] == "continuous" and m["commissioned"] and m["bidirectional"]
     assert "bottom_fs" not in m and not fresh.limits_on()
+
+
+def test_groups_follow_renumbering(rig):
+    cfg, tx, eng = rig
+    cfg.data["groups"] = [{"name": "left", "motors": [0, 1]}, {"name": "right", "motors": [2, 3]}]
+    _run(eng, 0.6)
+    eng.remove_motors([1])
+    assert cfg.data["groups"] == [{"name": "left", "motors": [0]}, {"name": "right", "motors": [1, 2]}]
+    assert eng.eval_ctx()["groups"] == {"left": [0], "right": [1, 2]}

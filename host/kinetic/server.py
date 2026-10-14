@@ -48,6 +48,8 @@ def create_app(engine: Engine) -> web.Application:
             "show": engine.show,
             "shows": engine.list_shows(),
             "patterns": M.PATTERNS,
+            "mod_params": M.MOD_PARAMS,
+            "blends": M.BLENDS,
             "common_params": M.COMMON_PARAMS,
             "eases": M.EASES,
             "steps_per_mm": engine.cfg.steps_per_mm,
@@ -109,8 +111,11 @@ def create_app(engine: Engine) -> web.Application:
         vmax = [cfg.amax(i) if cfg.is_continuous(i) else cfg.vmax(i) for i in range(n)]
         amax = [cfg.amax(i) * 20 if cfg.is_continuous(i) else cfg.amax(i) for i in range(n)]
         try:
+            ctx = engine.eval_ctx()
+            if isinstance(body.get("clips"), list):     # the editor's unsaved clip library
+                ctx["clips"] = {c["id"]: c for c in body["clips"] if isinstance(c, dict) and "id" in c}
             data = await asyncio.get_running_loop().run_in_executor(
-                None, M.render_clip, body["clip"], cfg.motors, travel, vmax, amax)
+                None, lambda: M.render_clip(body["clip"], cfg.motors, travel, vmax, amax, ctx=ctx))
         except Exception as e:  # noqa: BLE001
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response(data)

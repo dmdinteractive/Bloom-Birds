@@ -66,6 +66,7 @@
         <div class="row gap mb">
           <button class="btn" id="btnAddPattern">New Pattern</button>
           <button class="btn" id="btnAddTimeline">New Timeline</button>
+          <button class="btn" id="btnAddLayers" title="Mix other clips: each layer drives a motor group with a blend mode">New Layered</button>
         </div>
         <div class="list-head cl-cols"><span>Name</span><span>Type</span><span>Length</span></div>
         <ul class="list" id="clipList"></ul>
@@ -169,6 +170,14 @@
         </div>
         <p class="note">X/Y are plan-view positions (0–1) used by wave, ripple and spin patterns. Mechanism and Size are set in Motor Setup (Size = spool diameter mm, screw lead mm, or gear ratio). Max speed/accel are in each motor's units per second (mm, °, rev); blank uses the defaults. Trim offsets one axis; Travel applies until the ends are taught.</p>
         <div class="row gap end"><button class="btn default" id="btnSaveLayout">Apply Layout</button></div>
+      </fieldset>
+      <fieldset class="group span2">
+        <legend>Motor Groups</legend>
+        <div id="groupsBox"></div>
+        <div class="row gap mb"><button class="btn" id="btnAddGroup">Add Group</button>
+          <span class="spacer"></span><button class="btn default" id="btnSaveGroups">Apply Groups</button></div>
+        <p class="note">Groups (e.g. left wing / right wing, flock A / flock B) can be the target of a clip or of a layer
+          in a layered clip, so different parts of the sculpture can do different things at the same time.</p>
       </fieldset>
     </div>
   </section>

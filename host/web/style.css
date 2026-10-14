@@ -210,3 +210,21 @@ input[type=range] { width: 100%; accent-color: #4a525b; height: 16px; margin: 0;
 /* motor count stepper in the Axes toolbar */
 .count-ctl { display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--line-2, #c9cdd2); border-radius: 2px; height: 26px; }
 .count-ctl b { font-family: Consolas, Menlo, monospace; min-width: 18px; text-align: center; }
+
+/* layered clips */
+.layers { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.layer { border: 1px solid var(--line-2, #c9cdd2); background: #fff; padding: 6px 8px; border-radius: 2px; }
+.layer.off { opacity: .55; }
+.layer-head { display: flex; align-items: center; gap: 6px; }
+.layer-head select { flex: 1; min-width: 0; }
+.layer-head .spacer, .row .spacer { flex: 1; }
+.layer-row { display: grid; grid-template-columns: 1fr; gap: 4px; margin-top: 6px; font-size: 12px; }
+.layer-row label { display: grid; grid-template-columns: 48px 1fr auto; align-items: center; gap: 6px; }
+.layer-head { flex-wrap: wrap; }
+.layer-head select { flex: 1 1 120px; }
+.layer, .layers { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.layer-row select, .layer-row input[type=range] { flex: 1; min-width: 0; }
+.layer-row .num { width: 60px; }
+.groups-table input[type=text] { width: 150px; }
+.p-full > .layers { flex: 1 1 100%; }
+p.note.p-full { display: block; }

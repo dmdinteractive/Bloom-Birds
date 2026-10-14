@@ -81,6 +81,7 @@ DEFAULT_CONFIG = {
     },
     "layout": "line",
     "motors": [],   # filled by default_motors()
+    "groups": [],   # [{"name": "Left wing", "motors": [0, 2]}]: targets for clips and layers
 }
 
 

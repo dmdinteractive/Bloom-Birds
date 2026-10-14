@@ -49,6 +49,7 @@ async function loadState() {
   S.config = st.config; S.show = st.show; S.shows = st.shows; S.patterns = st.patterns;
   S.common = st.common_params; S.eases = st.eases; S.spm = st.steps_per_mm; S.simulate = st.simulate;
   S.kinds = st.kinds || {};
+  S.modParams = st.mod_params || []; S.blends = st.blends || {};
   $$(".sim-only").forEach((b) => (b.hidden = !S.simulate));
   const mem = st.config.mechanics.home_mode === "memory";
   $('[data-all="set_zero"]').hidden = mem;          // in memory mode the top is taught in Motor Setup
@@ -99,7 +100,7 @@ function addEvents(evs) {
 // ------------------------------------------------------------ show helpers
 const clipById = (id) => S.show?.clips.find((c) => c.id === id);
 const nMotors = () => S.config.motors.length;
-const typeName = (c) => (c?.type === "timeline" ? "Timeline" : "Pattern");
+const typeName = (c) => (c?.type === "timeline" ? "Timeline" : c?.type === "layers" ? "Layered" : "Pattern");
 const saveShowSoon = debounce(async () => {
   try { await api("PUT", "/api/show", S.show); } catch (e) { toast("Save failed: " + e.message, true); }
 }, 250);
@@ -114,9 +115,17 @@ function patternDefaults(name) {
   for (const d of S.common) p[d.key] = d.default;
   for (const d of S.patterns[name]?.params || []) p[d.key] = d.default;
   if (name === "pose") p.values = Array.from({ length: nMotors() }, () => 0.5);
+  for (const d of S.patterns[name]?.params || []) if (d.type === "list") p[d.key] = [...d.default];
   return p;
 }
 function addClip(type) {
+  if (type === "layers") {
+    const subs = S.show.clips.filter((c) => c.type !== "layers").slice(0, 2);
+    const clip = { id: newId(), name: "New layered", type: "layers", duration: 60, fade: 4, base: 0,
+      layers: subs.map((c, k) => ({ clip: c.id, target: "", blend: k ? "add" : "over", mix: 1, offset: 0, enabled: true })) };
+    S.show.clips.push(clip); S.selClip = clip.id; S.selKey = null;
+    showChanged({ structure: true }); renderEditor(); return;
+  }
   const clip = type === "pattern"
     ? { id: newId(), name: "New pattern", type: "pattern", pattern: "wave", duration: 60, fade: 4, params: patternDefaults("wave") }
     : { id: newId(), name: "New timeline", type: "timeline", duration: 20, fade: 3, mode: "shared", stagger: 0,
@@ -194,6 +203,7 @@ function markPlaying() {
 
 $("#btnAddPattern").onclick = () => addClip("pattern");
 $("#btnAddTimeline").onclick = () => addClip("timeline");
+$("#btnAddLayers").onclick = () => addClip("layers");
 $("#btnSaveAs").onclick = async () => {
   const name = prompt("Save show as:", S.show.name); if (!name) return;
   const r = await api("POST", "/api/show/saveas", { name });
@@ -244,14 +254,20 @@ function renderEditor() {
       S.config.motors.forEach((m, i) => { h += sliderProp(i, { label: m.name, min: 0, max: 1, step: 0.01, default: 0.5, unit: "" }, vals[i], "pose"); });
     } else {
       h += sec("Motion");
-      for (const d of S.common) h += sliderProp(d.key, d, c.params[d.key]);
+      const common = S.patterns[c.pattern]?.common;
+      for (const d of S.common) if (!common || common.includes(d.key)) h += sliderProp(d.key, d, c.params[d.key]);
       const extra = S.patterns[c.pattern]?.params || [];
       if (extra.length) h += sec("Shape");
       for (const d of extra) {
         if (d.type === "bool") h += prop(`<label for="pb_${d.key}">${esc(d.label)}</label>`, `<input type="checkbox" id="pb_${d.key}" data-pb="${d.key}" ${c.params[d.key] ? "checked" : ""}>`);
-        else h += sliderProp(d.key, d, c.params[d.key]);
+        else if (d.type === "list") {
+          const cnt = Math.round(c.params[d.count_key] ?? 4), vals = c.params[d.key] || d.default;
+          for (let k = 0; k < cnt; k++) h += sliderProp(k, { label: `${d.label} ${k + 1}`, min: 0, max: 1, step: 0.01, default: 0.5, unit: "" }, vals[k] ?? 0.5, "lv");
+        } else h += sliderProp(d.key, d, c.params[d.key]);
       }
     }
+  } else if (c.type === "layers") {
+    h += layersHtml(c);
   } else {
     const own = (i) => (c.tracks[String(i)] || []).length > 0;
     h += sec("Curves") + prop(`<label for="c_mode">Mode</label>`, `<select id="c_mode" data-c="mode">
@@ -275,6 +291,7 @@ function renderEditor() {
       "Last keyframe flows back into the first.");
     h += `</div><div class="props" id="keybox"></div><p class="note">Double-click the profile to add a keyframe. Drag to move (snaps to 0.25 s; hold Alt for free placement). Delete removes the selected key.</p><div>`;
   }
+  if (c.type !== "layers") h += `</div><div class="props">` + shapingHtml(c);
   h += `</div><div class="editor-actions">
       <button class="btn default" data-act="solo">Preview Clip</button>
       <button class="btn" data-act="toPlaylist">Add to Playlist</button>
@@ -285,6 +302,65 @@ function renderEditor() {
   updateKeyBox();
   updateSoloHint();
 }
+// ---- shaping (clip["mods"]) and targets: shared by pattern and timeline clips
+const groupNames = () => (S.config.groups || []).map((g) => g.name).filter(Boolean);
+const targetSelect = (val, attrs) => `<select ${attrs}><option value="">All motors</option>${groupNames().map((g) =>
+  `<option value="${esc(g)}" ${g === val ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>`;
+function restOf(c) {
+  if (c.mods?.rest !== undefined && c.mods?.rest !== null) return c.mods.rest;
+  if (c.type === "pattern") return c.pattern === "steps" ? 0.5 : (c.params?.center ?? 0.5);
+  return 0;
+}
+function shapingHtml(c) {
+  const m = c.mods || {};
+  let h = sec("Target & shaping");
+  h += prop(`<label for="c_target">Target</label>`, targetSelect(c.target || "", `id="c_target" data-c="target"`),
+    groupNames().length ? "Motors outside the target wait at the rest position." : "Make groups under Setup → Motor Groups.");
+  for (const d of S.modParams || []) {
+    if (d.key === "stagger" && c.type !== "pattern") continue;          // timelines have their own stagger
+    const v = d.key === "rest" ? restOf(c) : m[d.key];
+    h += sliderProp(d.key, { ...d, default: d.default ?? 0.5 }, v, "m");
+  }
+  if (c.type === "pattern") {
+    h += prop(`<label for="m_sby">Stagger order</label>`, `<select id="m_sby" data-mc="stagger_by">
+      <option value="index" ${m.stagger_by !== "x" && m.stagger_by !== "center" ? "selected" : ""}>Axis number</option>
+      <option value="x" ${m.stagger_by === "x" ? "selected" : ""}>Left to right</option>
+      <option value="center" ${m.stagger_by === "center" ? "selected" : ""}>Center outward</option></select>`);
+  }
+  h += prop(`<label for="m_inv">Invert</label>`, `<input type="checkbox" id="m_inv" data-mb="invert" ${m.invert ? "checked" : ""}>`,
+    "Swap home and far end: up becomes down");
+  h += prop(`<label for="m_mir">Mirror left/right</label>`, `<input type="checkbox" id="m_mir" data-mb="mirror" ${m.mirror ? "checked" : ""}>`,
+    "Spatial patterns run symmetrically from the center line, like a pair of wings");
+  return h;
+}
+function layersHtml(c) {
+  const subs = S.show.clips.filter((x) => x.type !== "layers");
+  let h = sec("Layers") + sliderProp("base", { label: "Base position", min: 0, max: 1, step: 0.01, default: 0,
+    help: "Where motors sit before any layer moves them (0 = home)" }, c.base ?? 0, "c");
+  h += `<div class="p-full"><div class="layers">` + (c.layers || []).map((L, i) => `
+    <div class="layer ${L.enabled === false ? "off" : ""}">
+      <div class="layer-head"><input type="checkbox" data-ly="enabled" data-li="${i}" ${L.enabled === false ? "" : "checked"} title="Layer on/off">
+        <b>Layer ${i + 1}</b>
+        <select data-ly="clip" data-li="${i}" aria-label="Clip">${subs.map((x) => `<option value="${x.id}" ${x.id === L.clip ? "selected" : ""}>${esc(x.name)}</option>`).join("")}
+          ${subs.some((x) => x.id === L.clip) ? "" : `<option value="" selected>(missing clip)</option>`}</select>
+        <span class="spacer"></span>
+        <button class="btn small" data-lact="up" data-li="${i}" ${i === 0 ? "disabled" : ""} aria-label="Move up">▲</button>
+        <button class="btn small" data-lact="down" data-li="${i}" ${i === c.layers.length - 1 ? "disabled" : ""} aria-label="Move down">▼</button>
+        <button class="btn small" data-lact="del" data-li="${i}" aria-label="Remove layer">✕</button></div>
+      <div class="layer-row">
+        <label>Target ${targetSelect(L.target || "", `data-ly="target" data-li="${i}"`)}</label>
+        <label>Blend <select data-ly="blend" data-li="${i}">${Object.entries(S.blends || {}).map(([k, v]) =>
+          `<option value="${k}" ${k === (L.blend || "over") ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+        <label>Mix <input type="range" min="0" max="1" step="0.01" value="${L.mix ?? 1}" data-ly="mix" data-li="${i}"><span class="mono">${Math.round((L.mix ?? 1) * 100)}%</span></label>
+        <label>Offset <input type="number" class="num" step="0.1" value="${L.offset ?? 0}" data-ly="offset" data-li="${i}"><span class="unit">s</span></label>
+      </div></div>`).join("") + `</div>
+    <button class="btn small" data-lact="add">Add Layer</button></div>`;
+  h += `<p class="note p-full">Layers apply top to bottom. <b>Over</b> replaces what's below, <b>Add</b> puts a clip's movement on top
+    (e.g. a fast flutter over a slow rise), <b>Scale</b> uses a clip as a volume control toward home, <b>Highest/Lowest</b> pick
+    per motor. Each layer can drive just one group. Layered clips use clips from the library; edit those to change a layer.</p>`;
+  return h;
+}
+
 function updateSoloHint() {
   const el = $("#soloHint"); if (!el) return;
   el.textContent = S.tick?.armed ? "Axes enabled: preview drives the sculpture." : "Axes disabled: preview is on screen only.";
@@ -304,6 +380,19 @@ $("#editor").addEventListener("input", (ev) => {
   } else if (t.dataset.c === "stagger") {
     if (t.value === "") return;
     c.stagger = num(0, 3600); syncPair(t); showChanged();
+  } else if (t.dataset.c === "base") {
+    if (t.value === "") return;
+    c.base = num(0, 1); syncPair(t); showChanged();
+  } else if (t.dataset.m !== undefined) {
+    if (t.value === "" || isNaN(parseFloat(t.value))) return;
+    c.mods = c.mods || {}; c.mods[t.dataset.m] = num(parseFloat(t.min), parseFloat(t.max)); syncPair(t); showChanged();
+  } else if (t.dataset.lv !== undefined) {
+    if (t.value === "") return;
+    const k = +t.dataset.lv; c.params.levels = [...(c.params.levels || S.patterns.steps.params.find((d) => d.key === "levels").default)];
+    c.params.levels[k] = num(0, 1); syncPair(t); showChanged();
+  } else if (t.dataset.ly === "mix") {
+    const L = c.layers[+t.dataset.li]; L.mix = num(0, 1);
+    t.nextElementSibling.textContent = `${Math.round(L.mix * 100)}%`; showChanged();
   } else if (t.dataset.c === "name") {
     c.name = t.value; $("#editorTitle").textContent = `Clip Properties — ${typeName(c)}`; showChanged({ structure: true });
   } else if (t.dataset.k !== undefined && t.dataset.k !== "ease") {
@@ -318,8 +407,20 @@ $("#editor").addEventListener("change", (ev) => {
   else if (k === "pattern") { c.pattern = t.value; c.params = { ...patternDefaults(t.value), ...c.params }; if (t.value === "pose" && !c.params.values) c.params.values = patternDefaults("pose").values; showChanged(); renderEditor(); }
   else if (k === "mode" || k === "stagger_by") { c[k] = t.value; showChanged(); renderEditor(); }
   else if (t.dataset.pb) { c.params[t.dataset.pb] = t.checked; showChanged(); }
+  else if (k === "target") { c.target = t.value || undefined; showChanged(); }
+  else if (t.dataset.mb) { c.mods = c.mods || {}; c.mods[t.dataset.mb] = t.checked; showChanged(); }
+  else if (t.dataset.mc) { c.mods = c.mods || {}; c.mods[t.dataset.mc] = t.value; showChanged(); }
+  else if (t.dataset.ly && t.dataset.ly !== "mix") {
+    const L = c.layers[+t.dataset.li], f = t.dataset.ly;
+    if (f === "enabled") L.enabled = t.checked;
+    else if (f === "offset") L.offset = parseFloat(t.value) || 0;
+    else if (f === "target") L.target = t.value || undefined;
+    else L[f] = t.value;
+    showChanged(); if (f === "enabled") renderEditor();
+  }
   else if (t.dataset.cb) { c[t.dataset.cb] = t.checked; showChanged(); }
   else if (t.dataset.k === "ease") { if (S.selKey) { S.selKey[2] = t.value; showChanged(); } }
+  else if (t.dataset.p === "count") { renderEditor(); }
   else if (t.type === "number" && (t.dataset.p !== undefined || t.dataset.pose !== undefined || t.dataset.c === "stagger")) {
     t.value = fmtNum(clamp(parseFloat(t.value) || 0, parseFloat(t.min), parseFloat(t.max)), parseFloat(t.step));   // tidy on commit
   }
@@ -327,6 +428,17 @@ $("#editor").addEventListener("change", (ev) => {
 $("#editor").addEventListener("click", (ev) => {
   const t = ev.target.closest("button"), c = clipById(S.selClip); if (!c || !t) return;
   if (t.dataset.motor !== undefined) { S.selMotor = +t.dataset.motor; S.selKey = null; renderEditor(); return; }
+  if (t.dataset.lact) {
+    const i = +t.dataset.li, a = t.dataset.lact, Ls = c.layers;
+    if (a === "add") {
+      const first = S.show.clips.find((x) => x.type !== "layers");
+      if (!first) { toast("Make a pattern or timeline clip first", true); return; }
+      Ls.push({ clip: first.id, target: "", blend: Ls.length ? "add" : "over", mix: 1, offset: 0, enabled: true });
+    } else if (a === "del") Ls.splice(i, 1);
+    else if (a === "up" && i > 0) [Ls[i - 1], Ls[i]] = [Ls[i], Ls[i - 1]];
+    else if (a === "down" && i < Ls.length - 1) [Ls[i + 1], Ls[i]] = [Ls[i], Ls[i + 1]];
+    showChanged(); renderEditor(); return;
+  }
   const act = t.dataset.act; if (!act) return;
   if (act === "solo") { send("solo", { clip: c.id }); toast(`Previewing "${c.name}"` + (S.tick?.armed ? " on the sculpture" : "")); }
   else if (act === "toPlaylist") { S.show.playlist.push({ clip: c.id, repeat: 1 }); showChanged({ structure: true }); toast("Added to playlist"); }
@@ -334,7 +446,8 @@ $("#editor").addEventListener("click", (ev) => {
     const d = JSON.parse(JSON.stringify(c)); d.id = newId(); d.name = c.name + " copy";
     S.show.clips.splice(S.show.clips.indexOf(c) + 1, 0, d); S.selClip = d.id; showChanged({ structure: true }); renderEditor();
   } else if (act === "delete") {
-    if (!confirm(`Delete "${c.name}"? It will also be removed from the playlist.`)) return;
+    const usedBy = S.show.clips.filter((x) => x.type === "layers" && (x.layers || []).some((L) => L.clip === c.id)).map((x) => x.name);
+    if (!confirm(`Delete "${c.name}"? It will also be removed from the playlist.` + (usedBy.length ? `\n\nIt is a layer in: ${usedBy.join(", ")}.` : ""))) return;
     S.show.clips = S.show.clips.filter((x) => x.id !== c.id);
     S.show.playlist = S.show.playlist.filter((e) => e.clip !== c.id);
     S.selClip = S.show.clips[0]?.id ?? null; showChanged({ structure: true }); renderEditor();
@@ -414,7 +527,7 @@ const requestRender = debounce(async () => {
   const c = clipById(S.selClip);
   if (!c) { S.render = null; return; }
   try {
-    const r = await api("POST", "/api/render", { clip: c });
+    const r = await api("POST", "/api/render", { clip: c, clips: S.show.clips });
     S.render = r; S.renderFor = c.id;
     const bad = r.limited.filter(Boolean).length;
     const w = $("#limitWarning");
@@ -864,6 +977,7 @@ function renderSettings() {
   $("#spmInfo").textContent = `${S.spm.toFixed(3)} µstep/mm`;
   $("#presetCount").value = S.config.motors.length;
   renderLayoutTable();
+  S.groups = null; renderGroups();
 }
 $("#btnSaveMech").onclick = async () => {
   const mech = readForm($("#mechForm"), MECH_FIELDS);
@@ -883,6 +997,40 @@ $("#btnPreset").onclick = async () => {
   await api("PUT", "/api/config", { layout_preset: $("#presetKind").value, layout_preset_count: count, layout: $("#presetKind").value });
   await loadState(); toast("Layout generated");
 };
+// ------------------------------------------------------------ motor groups
+function renderGroups() {
+  const box = $("#groupsBox"); if (!box || !S.config) return;
+  S.groups = S.groups || JSON.parse(JSON.stringify(S.config.groups || []));
+  if (!S.groups.length) { box.innerHTML = `<p class="note">No groups yet.</p>`; return; }
+  box.innerHTML = `<table class="grid-table groups-table"><thead><tr><th>Group</th>${S.config.motors.map((m) => `<th class="c">${esc(m.name)}</th>`).join("")}<th></th></tr></thead><tbody>` +
+    S.groups.map((g, gi) => `<tr><td><input type="text" data-g="name" data-gi="${gi}" value="${esc(g.name)}" aria-label="Group name"></td>` +
+      S.config.motors.map((m, i) => `<td class="c"><input type="checkbox" data-g="m" data-gi="${gi}" data-mi="${i}" ${(g.motors || []).includes(i) ? "checked" : ""} aria-label="${esc(m.name)} in ${esc(g.name)}"></td>`).join("") +
+      `<td><button class="btn small" data-gdel="${gi}">Delete</button></td></tr>`).join("") + `</tbody></table>`;
+}
+$("#groupsBox").addEventListener("input", (ev) => {
+  const t = ev.target, g = S.groups?.[+t.dataset.gi]; if (!g) return;
+  if (t.dataset.g === "name") g.name = t.value;
+  else if (t.dataset.g === "m") {
+    const i = +t.dataset.mi, set = new Set(g.motors || []);
+    if (t.checked) set.add(i); else set.delete(i);
+    g.motors = [...set].sort((a, b) => a - b);
+  }
+});
+$("#groupsBox").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-gdel]"); if (!b) return;
+  S.groups.splice(+b.dataset.gdel, 1); renderGroups();
+});
+$("#btnAddGroup").onclick = () => {
+  S.groups = S.groups || [];
+  S.groups.push({ name: `Group ${S.groups.length + 1}`, motors: [] }); renderGroups();
+};
+$("#btnSaveGroups").onclick = async () => {
+  const names = S.groups.map((g) => g.name.trim());
+  if (names.some((n) => !n) || new Set(names).size !== names.length) { toast("Each group needs a unique name", true); return; }
+  const r = await api("PUT", "/api/config", { groups: S.groups.map((g) => ({ name: g.name.trim(), motors: g.motors || [] })) });
+  S.config = r.config; S.groups = null; renderGroups(); renderEditor(); requestRender(); toast("Groups applied");
+};
+
 $("#btnSaveLayout").onclick = async () => {
   const r = await api("PUT", "/api/config", { motors: S.layoutMotors });
   S.config = r.config; S.layoutMotors = JSON.parse(JSON.stringify(S.config.motors)); renderTraceSel(); requestRender(); toast("Layout applied");

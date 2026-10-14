@@ -289,6 +289,26 @@ plays the playlist in a loop (turn this off under Setup → Startup).
 Every pattern also has **center height**, **amplitude**, **period**, and **dwell**. Dwell
 adds a pause at the top and bottom of each cycle, which reads as "breathing."
 
+More shapes, for any kind of kinetic piece:
+
+| Pattern | What it does |
+|---|---|
+| Flap / stroke | Fast one way, slow back (wing beats, paddles, pumps). Stroke share and snap set the feel |
+| Pulse / heartbeat | One to four quick beats, then rest |
+| Spring | A kick that bounces and settles |
+| Random twitches | Occasional quick moves at random times, per motor or all together (repeatable by seed) |
+| Step sequence | Up to 8 set positions, jumping or gliding between them |
+
+**Target & shaping** (every pattern and timeline clip): pick a **motor group** as the target (the
+others wait at the rest position), **fade the motion** in and out, ramp the **tempo**, **stagger**
+the motors, add per-motor **size and timing variation**, **invert** it, or **mirror** it left/right.
+
+**Layered clips** mix clips from the library. Each layer has a target group, a blend (Over, Add,
+Scale toward home, Highest, Lowest), a mix amount and a time offset. Example: a slow "Rise" clip
+Over everything, plus a fast "Flutter" clip Added only to the Wings group.
+
+**Motor groups** are named sets of motors (Setup → Motor Groups), e.g. Left wing / Right wing.
+
 **Timeline clips** are keyframe curves:
 
 - Double-click the graph to add a key, and drag to move it (snaps to 0.25 s; hold Alt to
@@ -342,7 +362,7 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 55 automated tests. They include:
+- **Pi software** is covered by 66 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;

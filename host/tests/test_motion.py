@@ -125,3 +125,97 @@ def test_render_clip_shape():
     r = M.render_clip(clip, MOTORS, [1000.0] * 8, 150, 300)
     assert len(r["t"]) == len(r["values"]) == len(r["limited"])
     assert len(r["values"][0]) == 8
+
+
+# ---------------------------------------------------------------- shapes, shaping, layers, groups
+
+from kinetic.config import default_motors as _dm  # noqa: E402
+
+
+def _pat(name, **params):
+    base = {"center": 0.5, "amplitude": 0.4, "period": 2.0}
+    return {"type": "pattern", "pattern": name, "duration": 20, "params": {**base, **params}}
+
+
+def test_flap_is_fast_one_way_slow_the_other():
+    ms = _dm(1)
+    c = _pat("flap", stroke_share=0.25)
+    # reaches the far end at 25% of the cycle, home again at 100%
+    assert abs(M.eval_clip(c, 0.5, ms)[0] - 0.9) < 1e-6
+    assert abs(M.eval_clip(c, 0.0, ms)[0] - 0.1) < 1e-6
+    rise = M.eval_clip(c, 0.25, ms)[0] - M.eval_clip(c, 0.0, ms)[0]
+    fall = M.eval_clip(c, 0.5, ms)[0] - M.eval_clip(c, 0.75, ms)[0]
+    assert rise > 2 * fall
+
+
+def test_every_new_pattern_stays_in_range():
+    ms = _dm(5)
+    for name in ("flap", "pulse", "spring", "twitch", "steps"):
+        c = _pat(name, chance=1.0)
+        for k in range(200):
+            vals = M.eval_clip(c, k * 0.05, ms)
+            assert len(vals) == 5 and all(0.0 <= v <= 1.0 for v in vals), name
+
+
+def test_twitch_is_repeatable_and_only_sometimes_moves():
+    ms = _dm(3)
+    c = _pat("twitch", chance=1.0, width=0.3, seed=5)
+    a = [M.eval_clip(c, k * 0.1, ms) for k in range(60)]
+    b = [M.eval_clip(c, k * 0.1, ms) for k in range(60)]
+    assert a == b
+    assert any(v[0] != 0.5 for v in a) and any(v[0] == 0.5 for v in a)
+
+
+def test_steps_holds_levels():
+    ms = _dm(1)
+    c = _pat("steps", count=4, smooth=0.0, levels=[0.1, 0.6, 0.3, 0.9])
+    assert [round(M.eval_clip(c, t, ms)[0], 3) for t in (0.1, 0.6, 1.1, 1.6)] == [0.1, 0.6, 0.3, 0.9]
+
+
+def test_target_group_and_rest():
+    ms = _dm(4)
+    c = {**_pat("breathe"), "target": "wing", "mods": {"rest": 0.2}}
+    vals = M.eval_clip(c, 0.5, ms, {"groups": {"wing": [1, 3]}})
+    assert vals[0] == vals[2] == 0.2 and vals[1] == vals[3] != 0.2
+
+
+def test_fade_in_and_out_envelope():
+    ms = _dm(1)
+    c = {**_pat("breathe"), "duration": 10, "mods": {"fade_in": 2, "fade_out": 2, "rest": 0.5}}
+    assert M.eval_clip(c, 0.0, ms)[0] == 0.5
+    assert M.eval_clip(c, 10.0, ms)[0] == 0.5
+    assert abs(M.eval_clip(c, 5.0, ms)[0] - M.eval_clip(_pat("breathe"), 5.0, ms)[0]) < 1e-9
+
+
+def test_variation_makes_motors_differ_but_stays_repeatable():
+    ms = _dm(4)
+    c = {**_pat("breathe"), "mods": {"amp_var": 0.6, "time_var": 0.5, "seed": 2}}
+    v1 = M.eval_clip(c, 0.7, ms)
+    assert len(set(round(v, 4) for v in v1)) > 1
+    assert v1 == M.eval_clip(c, 0.7, ms)
+
+
+def test_invert_and_tempo_ramp():
+    ms = _dm(1)
+    c = _pat("breathe")
+    assert abs(M.eval_clip({**c, "mods": {"invert": True}}, 0.3, ms)[0] - (1 - M.eval_clip(c, 0.3, ms)[0])) < 1e-9
+    fast = {**c, "duration": 10, "mods": {"tempo_start": 2, "tempo_end": 2}}
+    assert abs(M.eval_clip(fast, 0.25, ms)[0] - M.eval_clip(c, 0.5, ms)[0]) < 1e-9
+
+
+def test_layers_blend_modes_and_targets():
+    ms = _dm(2)
+    slow = {"id": "s", **_pat("pose", center=0.4), "params": {"values": [0.4, 0.4]}}
+    flutter = {"id": "f", **_pat("pose"), "params": {"values": [0.7, 0.7], "center": 0.5}}
+    clips = {"s": slow, "f": flutter}
+    ctx = {"clips": clips, "groups": {"one": [1]}}
+    lay = {"type": "layers", "duration": 10, "base": 0.0, "layers": [
+        {"clip": "s", "blend": "over", "mix": 1.0},
+        {"clip": "f", "blend": "add", "mix": 1.0, "target": "one"}]}
+    v = M.eval_clip(lay, 1.0, ms, ctx)
+    assert abs(v[0] - 0.4) < 1e-9 and abs(v[1] - 0.6) < 1e-9      # 0.4 + (0.7 - 0.5)
+    lay["layers"][1]["blend"] = "scale"
+    v = M.eval_clip(lay, 1.0, ms, ctx)
+    assert abs(v[1] - 0.28) < 1e-9                                   # 0.4 * 0.7
+    lay["layers"].append({"clip": "missing"})                        # dangling references are ignored
+    assert len(M.eval_clip(lay, 1.0, ms, ctx)) == 2

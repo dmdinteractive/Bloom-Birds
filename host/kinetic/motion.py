@@ -101,8 +101,61 @@ PATTERNS: dict[str, dict] = {
          "help": "1 = neighbors move alike, 0 = every motor independent"},
         {"key": "seed", "label": "Seed", "min": 0, "max": 999, "step": 1, "default": 7},
     ]},
-    "pose": {"label": "Static pose", "params": []},   # uses params["values"]
+    "pose": {"label": "Static pose", "params": [], "common": []},   # uses params["values"]
+    "flap": {"label": "Flap / stroke (fast one way, slow back)", "params": [
+        {"key": "stroke_share", "label": "Stroke share", "min": 0.05, "max": 0.95, "step": 0.01, "default": 0.3,
+         "help": "Share of each cycle spent on the stroke toward the far end; the rest is the return. 0.5 = even"},
+        {"key": "snap", "label": "Snap", "min": 1, "max": 6, "step": 0.1, "default": 2,
+         "help": "1 = soft, higher = snappier start and stop of each stroke"},
+        {"key": "reverse_stroke", "label": "Fast stroke toward home", "type": "bool", "default": False},
+    ]},
+    "pulse": {"label": "Pulse / heartbeat", "params": [
+        {"key": "pulses", "label": "Pulses per cycle", "min": 1, "max": 4, "step": 1, "default": 2},
+        {"key": "width", "label": "Pulse width", "min": 0.02, "max": 0.5, "step": 0.01, "default": 0.12,
+         "help": "Length of each pulse as a share of the cycle"},
+        {"key": "gap", "label": "Gap between pulses", "min": 0, "max": 0.5, "step": 0.01, "default": 0.06},
+    ]},
+    "spring": {"label": "Spring (kick and settle)", "params": [
+        {"key": "bounces", "label": "Bounces per cycle", "min": 1, "max": 12, "step": 0.5, "default": 4},
+        {"key": "damping", "label": "Settle", "min": 0, "max": 10, "step": 0.1, "default": 4,
+         "help": "How quickly the bouncing dies away. 0 = keeps bouncing"},
+    ]},
+    "twitch": {"label": "Random twitches", "params": [
+        {"key": "chance", "label": "Twitch chance", "min": 0, "max": 1, "step": 0.01, "default": 0.5,
+         "help": "Chance that each motor twitches once in every cycle"},
+        {"key": "width", "label": "Twitch length", "min": 0.02, "max": 0.5, "step": 0.01, "default": 0.15,
+         "help": "Length of a twitch as a share of the cycle"},
+        {"key": "together", "label": "All motors together", "type": "bool", "default": False},
+        {"key": "seed", "label": "Seed", "min": 0, "max": 999, "step": 1, "default": 3},
+    ]},
+    "steps": {"label": "Step sequence", "common": ["period"], "params": [
+        {"key": "count", "label": "Steps", "min": 2, "max": 8, "step": 1, "default": 4},
+        {"key": "smooth", "label": "Smoothness", "min": 0, "max": 1, "step": 0.01, "default": 0.4,
+         "help": "0 = jump between steps, 1 = glide the whole time"},
+        {"key": "levels", "label": "Step", "type": "list", "count_key": "count", "default": [0.1, 0.6, 0.3, 0.9, 0.5, 0.2, 0.8, 0.4]},
+    ]},
 }
+
+# Shaping that works on every pattern and timeline clip (clip["mods"]).
+MOD_PARAMS = [
+    {"key": "rest", "label": "Rest position", "min": 0, "max": 1, "step": 0.01, "default": None,
+     "help": "Where motors outside the target group wait, and where fades start and end. Blank = the clip's center"},
+    {"key": "fade_in", "label": "Fade motion in", "min": 0, "max": 120, "step": 0.5, "default": 0, "unit": "s",
+     "help": "Movement grows from the rest position over this time at the start of the clip"},
+    {"key": "fade_out", "label": "Fade motion out", "min": 0, "max": 120, "step": 0.5, "default": 0, "unit": "s",
+     "help": "Movement shrinks back to the rest position over this time at the end of the clip"},
+    {"key": "tempo_start", "label": "Tempo at start", "min": 0.25, "max": 4, "step": 0.05, "default": 1, "unit": "×"},
+    {"key": "tempo_end", "label": "Tempo at end", "min": 0.25, "max": 4, "step": 0.05, "default": 1, "unit": "×",
+     "help": "Speed the motion up or slow it down across the clip"},
+    {"key": "stagger", "label": "Stagger", "min": 0, "max": 30, "step": 0.1, "default": 0, "unit": "s",
+     "help": "Delay spread across motors (patterns; timelines have their own)"},
+    {"key": "amp_var", "label": "Size variation", "min": 0, "max": 1, "step": 0.01, "default": 0,
+     "help": "Each motor moves a random amount less than the others"},
+    {"key": "time_var", "label": "Timing variation", "min": 0, "max": 5, "step": 0.05, "default": 0, "unit": "s",
+     "help": "Each motor runs a random amount early or late"},
+    {"key": "seed", "label": "Variation seed", "min": 0, "max": 999, "step": 1, "default": 11},
+]
+BLENDS = {"over": "Over (replace)", "add": "Add (on top)", "scale": "Scale toward home", "max": "Highest", "min": "Lowest"}
 
 
 def _param(p: dict, key: str, default):
@@ -185,7 +238,95 @@ def eval_pattern(name: str, t: float, motors: list[dict], p: dict) -> list[float
             out.append(clamp(center + amp * max(-1.0, min(1.0, v * 1.6))))
         return out
 
+    if name == "flap":
+        share = clamp(float(_param(p, "stroke_share", 0.3)), 0.02, 0.98)
+        k = max(1.0, float(_param(p, "snap", 2)))
+        rev = bool(p.get("reverse_stroke"))
+        v = center + amp * stroke_wave(cyc, share, k, dwell)
+        if rev:
+            v = center - amp * stroke_wave(cyc, share, k, dwell)
+        return [clamp(v)] * n
+
+    if name == "pulse":
+        f = cyc - math.floor(cyc)
+        npulse = max(1, int(_param(p, "pulses", 2)))
+        w = max(0.01, float(_param(p, "width", 0.12)))
+        gap = max(0.0, float(_param(p, "gap", 0.06)))
+        bump = 0.0
+        for k in range(npulse):
+            st = k * (w + gap)
+            if st <= f < st + w:
+                bump = math.sin(math.pi * (f - st) / w) ** 2
+        return [clamp(center - amp + 2 * amp * bump)] * n
+
+    if name == "spring":
+        f = cyc - math.floor(cyc)
+        b = max(0.5, float(_param(p, "bounces", 4)))
+        damp = max(0.0, float(_param(p, "damping", 4)))
+        v = center + amp * math.exp(-damp * f) * math.cos(2 * math.pi * b * f)
+        return [clamp(v)] * n
+
+    if name == "twitch":
+        chance = clamp(float(_param(p, "chance", 0.5)))
+        w = max(0.01, float(_param(p, "width", 0.15)))
+        seed = int(_param(p, "seed", 3))
+        together = bool(p.get("together"))
+        k = math.floor(cyc)
+        f = cyc - k
+        out = []
+        for i in range(n):
+            vi = center
+            for kk in (k - 1, k):                    # a twitch may run over from the last cycle
+                rng = random.Random(hash((seed, kk, 0 if together else i)) & 0xFFFFFFFF)
+                if rng.random() >= chance:
+                    continue
+                start = rng.uniform(0, 1 - min(w, 0.99))
+                size = rng.uniform(0.4, 1.0) * (1 if rng.random() < 0.5 else -1)
+                u = (f + (k - kk) - start) / w
+                if 0 <= u <= 1:
+                    vi = center + amp * size * math.sin(math.pi * u) ** 2
+            out.append(clamp(vi))
+        return out
+
+    if name == "steps":
+        count = max(2, min(8, int(_param(p, "count", 4))))
+        levels = list(p.get("levels") or PATTERNS["steps"]["params"][2]["default"])
+        levels = (levels + [0.5] * 8)[:count]
+        sm = clamp(float(_param(p, "smooth", 0.4)))
+        f = (cyc - math.floor(cyc)) * count
+        j = int(f) % count
+        u = f - math.floor(f)
+        a_, b_ = float(levels[j]), float(levels[(j + 1) % count])
+        if sm <= 0 or u < 1 - sm:
+            return [clamp(a_)] * n
+        e = smootherstep((u - (1 - sm)) / sm)
+        return [clamp(a_ + (b_ - a_) * e)] * n
+
     raise ValueError(f"unknown pattern {name}")
+
+
+def stroke_wave(u: float, share: float, snap: float, dwell: float = 0.0) -> float:
+    """Asymmetric periodic wave in [-1, 1]: rises from -1 to +1 over `share` of the moving part
+    of the cycle and falls back over the rest. `snap` sharpens the start/stop of each stroke."""
+    d = clamp(dwell, 0.0, 0.9)
+    move = 1.0 - d
+    f = u - math.floor(u)
+    s1 = move * share
+    s2 = move * (1 - share)
+
+    def e(x):
+        x = clamp(x)
+        a, b = x ** snap, (1 - x) ** snap
+        return a / (a + b) if a + b > 0 else x
+    if f < s1:
+        return -1 + 2 * e(f / s1)
+    f -= s1
+    if f < d / 2:
+        return 1.0
+    f -= d / 2
+    if f < s2:
+        return 1 - 2 * e(f / s2)
+    return -1.0
 
 
 # ------------------------------------------------------------------ keyframes
@@ -263,10 +404,130 @@ def eval_timeline(clip: dict, t: float, motors: list[dict]) -> list[float]:
 
 # ------------------------------------------------------------------ clips
 
-def eval_clip(clip: dict, t: float, motors: list[dict]) -> list[float]:
+def group_members(target, n: int, groups: dict | None) -> set[int] | None:
+    """None = every motor. Otherwise the set of motor indexes in the named group."""
+    if not target or target == "all":
+        return None
+    members = (groups or {}).get(target)
+    if members is None:
+        return None
+    return {int(i) for i in members if 0 <= int(i) < n}
+
+
+def _order(motors: list[dict], by: str, reverse: bool) -> list[float]:
+    n = len(motors)
+    if by == "x":
+        order = _normalize([m["x"] for m in motors])
+    elif by == "center":
+        order = _normalize([abs(m["x"] - 0.5) + abs(m["y"] - 0.5) for m in motors])
+    else:
+        order = [i / (n - 1) if n > 1 else 0.0 for i in range(n)]
+    return [1 - o for o in order] if reverse else order
+
+
+def _rest(clip: dict) -> float:
+    r = (clip.get("mods") or {}).get("rest")
+    if r is not None:
+        return clamp(float(r))
+    if clip.get("type") == "pattern":
+        if clip.get("pattern") == "steps":
+            return 0.5
+        return clamp(float((clip.get("params") or {}).get("center", 0.5)))
+    return 0.0
+
+
+def _warp(t: float, dur: float, a: float, b: float) -> float:
+    """Clip time with a tempo that ramps linearly from a to b across the clip."""
+    if abs(a - 1) < 1e-9 and abs(b - 1) < 1e-9 or dur <= 0:
+        return t
+    tc = min(max(t, 0.0), dur)
+    w = tc * (a + (b - a) * tc / (2 * dur))
+    return w + (t - tc) * b if t > dur else w
+
+
+def _eval_raw(clip: dict, t: float, motors: list[dict]) -> list[float]:
     if clip.get("type") == "timeline":
         return eval_timeline(clip, t, motors)
     return eval_pattern(clip.get("pattern", "breathe"), t, motors, clip.get("params", {}))
+
+
+def eval_clip(clip: dict, t: float, motors: list[dict], ctx: dict | None = None) -> list[float]:
+    """Evaluate any clip at time t. ctx = {"groups": {name: [motor indexes]}, "clips": {id: clip}}."""
+    ctx = ctx or {}
+    if clip.get("type") == "layers":
+        return eval_layers(clip, t, motors, ctx)
+    n = len(motors)
+    mods = clip.get("mods") or {}
+    dur = float(clip.get("duration", 30))
+    rest = _rest(clip)
+    tt = _warp(t, dur, float(mods.get("tempo_start", 1) or 1), float(mods.get("tempo_end", 1) or 1))
+    if mods.get("mirror"):                     # symmetric about the center line: x -> distance from center
+        motors = [{**m, "x": abs(m["x"] - 0.5) * 2} for m in motors]
+    stagger = float(mods.get("stagger", 0) or 0) if clip.get("type") == "pattern" else 0.0
+    tvar = float(mods.get("time_var", 0) or 0)
+    avar = clamp(float(mods.get("amp_var", 0) or 0))
+    seed = int(mods.get("seed", 11) or 0)
+    if stagger or tvar:
+        order = _order(motors, mods.get("stagger_by", "index"), bool(mods.get("stagger_reverse")))
+        rng = random.Random(seed)
+        offs = [stagger * order[i] + (rng.uniform(-1, 1) * tvar) for i in range(n)]
+        vals = [_eval_raw(clip, tt - offs[i], motors)[i] for i in range(n)]
+    else:
+        vals = _eval_raw(clip, tt, motors)
+    if avar:
+        rng = random.Random(seed * 7919 + 1)
+        scales = [1 - avar * rng.random() for _ in range(n)]
+        vals = [rest + (v - rest) * k for v, k in zip(vals, scales)]
+    fi, fo = float(mods.get("fade_in", 0) or 0), float(mods.get("fade_out", 0) or 0)
+    env = 1.0
+    if fi > 0:
+        env = min(env, smootherstep(t / fi))
+    if fo > 0:
+        env = min(env, smootherstep((dur - t) / fo))
+    if env < 1.0:
+        vals = [rest + (v - rest) * env for v in vals]
+    if mods.get("invert"):
+        vals = [1 - v for v in vals]
+    members = group_members(clip.get("target"), n, ctx.get("groups"))
+    if members is not None:
+        vals = [v if i in members else rest for i, v in enumerate(vals)]
+    return [clamp(v) for v in vals]
+
+
+def eval_layers(clip: dict, t: float, motors: list[dict], ctx: dict) -> list[float]:
+    """A layered clip mixes other clips: each layer drives its target group with a blend mode."""
+    n = len(motors)
+    vals = [clamp(float(clip.get("base", 0.0)))] * n
+    clips = ctx.get("clips") or {}
+    for layer in clip.get("layers", []):
+        if layer.get("enabled") is False:
+            continue
+        sub = clips.get(layer.get("clip"))
+        if not sub or sub.get("type") == "layers":   # no nesting (and no loops)
+            continue
+        lv = eval_clip(sub, t - float(layer.get("offset", 0) or 0), motors, ctx)
+        members = group_members(layer.get("target"), n, ctx.get("groups"))
+        mix = clamp(float(layer.get("mix", 1.0)))
+        mode = layer.get("blend", "over")
+        rest = _rest(sub)
+        out = []
+        for i, (v, x) in enumerate(zip(vals, lv)):
+            if members is not None and i not in members:
+                out.append(v)
+                continue
+            if mode == "add":
+                r = v + mix * (x - rest)
+            elif mode == "scale":
+                r = v * (1 - mix + mix * x)
+            elif mode == "max":
+                r = v + mix * (max(v, x) - v)
+            elif mode == "min":
+                r = v + mix * (min(v, x) - v)
+            else:
+                r = v + mix * (x - v)
+            out.append(clamp(r))
+        vals = out
+    return vals
 
 
 def blend(a: list[float], b: list[float], w: float) -> list[float]:
@@ -329,7 +590,7 @@ class Limiter:
 
 
 def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax, amax,
-                samples_per_s: float = 10.0, max_samples: int = 1200) -> dict:
+                samples_per_s: float = 10.0, max_samples: int = 1200, ctx: dict | None = None) -> dict:
     """Sample a clip for the editor: desired drops plus where the limiter would kick in."""
     dur = max(0.5, float(clip.get("duration", 30)))
     n_samples = int(min(max_samples, max(20, dur * samples_per_s)))
@@ -337,7 +598,7 @@ def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax, amax,
     sim_dt = 1 / 50
     lim = Limiter(len(motors), vmax, amax, tolerance=0.5)
     lim.tol_relative = True
-    first = eval_clip(clip, 0.0, motors)
+    first = eval_clip(clip, 0.0, motors, ctx)
     lim.reset([f * tr for f, tr in zip(first, travel)])
     zeros = [0.0] * len(motors)
     times, desired, limited_any = [], [], []
@@ -345,7 +606,7 @@ def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax, amax,
     next_sample = 0.0
     lim_flags = [False] * len(motors)
     while t <= dur + 1e-9:
-        vals = eval_clip(clip, t, motors)
+        vals = eval_clip(clip, t, motors, ctx)
         lim.step([v * tr for v, tr in zip(vals, travel)], sim_dt, zeros, travel)
         lim_flags = [a or b for a, b in zip(lim_flags, lim.limited)]
         if t >= next_sample - 1e-9:

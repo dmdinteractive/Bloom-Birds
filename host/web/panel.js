@@ -336,7 +336,7 @@ function renderPlaylist() {
     return `<div class="pl-row ${on ? "" : "off"}" data-i="${i}">
       <button class="tog" role="switch" aria-checked="${on}" data-tog="${i}" aria-label="Clip on/off"></button>
       <span class="pl-num">${i + 1}</span>
-      <div><div class="pl-name">${esc(c?.name || "?")}</div><div class="pl-sub">${c?.type === "timeline" ? "Timeline" : "Pattern"} · ${fmtTime(c?.duration || 0)} each · ${fmtTime(entryLength(e))} total</div></div>
+      <div><div class="pl-name">${esc(c?.name || "?")}</div><div class="pl-sub">${c?.type === "timeline" ? "Timeline" : c?.type === "layers" ? "Layered" : "Pattern"} · ${fmtTime(c?.duration || 0)} each · ${fmtTime(entryLength(e))} total</div></div>
       <div class="stepper"><button class="mid" data-rep="${i}" data-d="-1" aria-label="Fewer repeats">−</button><div class="step-val">×${e.repeat || 1}</div><button class="mid" data-rep="${i}" data-d="1" aria-label="More repeats">+</button></div>
       <div class="pl-order"><button class="mid" data-move="${i}" data-d="-1" aria-label="Move up" ${i === 0 ? "disabled" : ""}>▲</button><button class="mid" data-move="${i}" data-d="1" aria-label="Move down" ${i === pl.length - 1 ? "disabled" : ""}>▼</button></div>
       <button class="mid" data-playfrom="${i}">Play from here</button></div>`;
