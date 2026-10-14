@@ -331,11 +331,39 @@ def stroke_wave(u: float, share: float, snap: float, dwell: float = 0.0) -> floa
 
 # ------------------------------------------------------------------ keyframes
 
-EASES = ["smooth", "linear", "ease_in", "ease_out", "hold"]
+EASES = ["smooth", "linear", "ease_in", "ease_out", "hold", "bezier"]
+DEFAULT_BEZIER = [0.4, 0.0, 0.6, 1.0]
 
 
-def _ease(kind: str, u: float) -> float:
+def cubic_bezier(u: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """CSS-style cubic-bezier easing: control points (x1, y1), (x2, y2) between (0,0) and (1,1).
+    y may go outside 0..1 for overshoot."""
+    x1, x2 = clamp(x1), clamp(x2)
+
+    def bx(s):
+        return 3 * x1 * s * (1 - s) ** 2 + 3 * x2 * s * s * (1 - s) + s ** 3
+
+    def by(s):
+        return 3 * y1 * s * (1 - s) ** 2 + 3 * y2 * s * s * (1 - s) + s ** 3
+    lo, hi = 0.0, 1.0
+    s = u
+    for _ in range(30):                      # bisection: x(s) is monotonic for x1, x2 in 0..1
+        xs = bx(s)
+        if abs(xs - u) < 1e-6:
+            break
+        if xs < u:
+            lo = s
+        else:
+            hi = s
+        s = (lo + hi) / 2
+    return by(s)
+
+
+def _ease(kind: str, u: float, bz=None) -> float:
     u = clamp(u)
+    if kind == "bezier":
+        b = list(bz) if bz and len(bz) == 4 else DEFAULT_BEZIER
+        return cubic_bezier(u, *[float(x) for x in b])
     if kind == "linear":
         return u
     if kind == "ease_in":
@@ -351,6 +379,11 @@ def _key_ease(k) -> str:
     return k[2] if len(k) > 2 else "smooth"
 
 
+def _key_opts(k) -> dict:
+    """Optional 4th element of a key: {"bz": [x1, y1, x2, y2]} for a custom curve."""
+    return k[3] if len(k) > 3 and isinstance(k[3], dict) else {}
+
+
 def eval_track(keys: list, t: float, duration: float, wrap: bool) -> float:
     """keys: list of [time_s, drop, ease]. The ease applies to the segment AFTER a key."""
     if not keys:
@@ -360,8 +393,8 @@ def eval_track(keys: list, t: float, duration: float, wrap: bool) -> float:
         t = t % duration
         # periodic: the segment after the last key wraps around to the first key
         first, last = ks[0], ks[-1]
-        ks = ([[last[0] - duration, last[1], _key_ease(last)]] + [list(k) for k in ks]
-              + [[first[0] + duration, first[1], _key_ease(first)]])
+        ks = ([[last[0] - duration, last[1], _key_ease(last), _key_opts(last)]] + [list(k) for k in ks]
+              + [[first[0] + duration, first[1], _key_ease(first), _key_opts(first)]])
     else:
         if t <= ks[0][0]:
             return float(ks[0][1])
@@ -371,7 +404,7 @@ def eval_track(keys: list, t: float, duration: float, wrap: bool) -> float:
         if a[0] <= t <= b[0]:
             span = b[0] - a[0]
             u = 0.0 if span <= 0 else (t - a[0]) / span
-            e = _ease(_key_ease(a), u)
+            e = _ease(_key_ease(a), u, _key_opts(a).get("bz"))
             return float(a[1]) + (float(b[1]) - float(a[1])) * e
     return float(ks[-1][1])
 

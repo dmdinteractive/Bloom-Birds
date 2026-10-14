@@ -228,3 +228,10 @@ input[type=range] { width: 100%; accent-color: #4a525b; height: 16px; margin: 0;
 .groups-table input[type=text] { width: 150px; }
 .p-full > .layers { flex: 1 1 100%; }
 p.note.p-full { display: block; }
+
+/* custom-curve handle numbers: four across, shrinking to fit the property column */
+.bzrow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; width: 100%; }
+.bzrow input.num { width: 100%; min-width: 0; }
+.bzrow input.num { padding: 3px 4px; text-align: center; -moz-appearance: textfield; appearance: textfield; }
+.bzrow input.num::-webkit-inner-spin-button, .bzrow input.num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.bzrow input.num { box-sizing: border-box; padding: 3px 1px; font-size: 12px; }

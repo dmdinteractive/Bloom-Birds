@@ -57,7 +57,7 @@ async function loadState() {
   S.layoutMotors = JSON.parse(JSON.stringify(S.config.motors));
   $("#motorCount").textContent = S.config.motors.length;
   if (!S.selClip || !clipById(S.selClip)) S.selClip = S.show.clips[0]?.id ?? null;
-  S.selKey = null;
+  setSel([]);
   if (S.highlight >= nMotors()) S.highlight = -1;
   renderShowSelect(); renderPlaylist(); renderClipList(); renderEditor(); renderTraceSel(); requestRender();
   renderSettings();
@@ -123,7 +123,7 @@ function addClip(type) {
     const subs = S.show.clips.filter((c) => c.type !== "layers").slice(0, 2);
     const clip = { id: newId(), name: "New layered", type: "layers", duration: 60, fade: 4, base: 0,
       layers: subs.map((c, k) => ({ clip: c.id, target: "", blend: k ? "add" : "over", mix: 1, offset: 0, enabled: true })) };
-    S.show.clips.push(clip); S.selClip = clip.id; S.selKey = null;
+    S.show.clips.push(clip); S.selClip = clip.id; setSel([]);
     showChanged({ structure: true }); renderEditor(); return;
   }
   const clip = type === "pattern"
@@ -132,7 +132,7 @@ function addClip(type) {
         stagger_by: "index", stagger_reverse: false, wrap: true,
         tracks: { all: [[0, 0.2, "smooth"], [10, 0.8, "smooth"]] } };
   S.show.clips.push(clip);
-  S.selClip = clip.id; S.selKey = null;
+  S.selClip = clip.id; setSel([]);
   showChanged({ structure: true }); renderEditor();
 }
 
@@ -188,7 +188,7 @@ function renderClipList() {
   markPlaying();
 }
 function selectClip(id) {
-  S.selClip = id; S.selKey = null; S.selMotor = 0;
+  S.selClip = id; setSel([]); S.selMotor = 0;
   renderClipList(); renderPlaylist(); renderEditor(); requestRender();
 }
 $("#clipList").addEventListener("click", (ev) => {
@@ -211,7 +211,7 @@ $("#btnSaveAs").onclick = async () => {
 };
 $("#showSelect").onchange = async (ev) => {
   const r = await api("POST", "/api/show/load", { name: ev.target.value });
-  S.show = r.show; S.selClip = S.show.clips[0]?.id ?? null; S.selKey = null;
+  S.show = r.show; S.selClip = S.show.clips[0]?.id ?? null; setSel([]);
   renderShowSelect(); renderPlaylist(); renderClipList(); renderEditor(); requestRender(); toast(`Loaded "${S.show.name}"`);
 };
 
@@ -289,7 +289,13 @@ function renderEditor() {
     h += prop(`<label for="c_rev">Reverse order</label>`, `<input type="checkbox" id="c_rev" data-cb="stagger_reverse" ${c.stagger_reverse ? "checked" : ""}>`);
     h += prop(`<label for="c_wrap">Seamless loop</label>`, `<input type="checkbox" id="c_wrap" data-cb="wrap" ${c.wrap !== false ? "checked" : ""}>`,
       "Last keyframe flows back into the first.");
-    h += `</div><div class="props" id="keybox"></div><p class="note">Double-click the profile to add a keyframe. Drag to move (snaps to 0.25 s; hold Alt for free placement). Delete removes the selected key.</p><div>`;
+    h += sec("Grid") + prop(`<label for="c_bpm">Tempo</label>`, `<input type="number" class="num" id="c_bpm" data-c="bpm" min="0" max="300" step="1" value="${c.bpm || 0}"><span class="unit">BPM</span>`,
+      "0 = no beat grid. With a tempo, the profile shows beats and bars and keys can snap to them.");
+    if (+c.bpm) h += prop(`<label for="c_bpb">Beats per bar</label>`, `<input type="number" class="num" id="c_bpb" data-c="beats_per_bar" min="1" max="16" step="1" value="${c.beats_per_bar || 4}">`);
+    h += prop(`<label for="c_snap">Snap</label>`, `<select id="c_snap" data-c="snap">${Object.entries(SNAP_LABEL)
+      .filter(([k]) => +c.bpm || ["quarter_s", "off"].includes(k)).map(([k, v]) =>
+        `<option value="${k}" ${(c.snap || (+c.bpm ? "beat" : "quarter_s")) === k ? "selected" : ""}>${v}</option>`).join("")}</select>`, "Hold Alt while dragging to place freely.");
+    h += `</div><div class="props" id="keybox"></div><p class="note">Double-click the profile to add a keyframe. Click a key to select it; Shift-click or drag a box to select several. Drag to move (snaps to the grid; Alt = free). Ctrl/⌘+C / V copy and paste (at the last clicked time), Ctrl/⌘+A selects all, Delete removes, arrow keys nudge.</p><div>`;
   }
   if (c.type !== "layers") h += `</div><div class="props">` + shapingHtml(c);
   h += `</div><div class="editor-actions">
@@ -395,7 +401,7 @@ $("#editor").addEventListener("input", (ev) => {
     t.nextElementSibling.textContent = `${Math.round(L.mix * 100)}%`; showChanged();
   } else if (t.dataset.c === "name") {
     c.name = t.value; $("#editorTitle").textContent = `Clip Properties — ${typeName(c)}`; showChanged({ structure: true });
-  } else if (t.dataset.k !== undefined && t.dataset.k !== "ease") {
+  } else if ((t.dataset.k !== undefined && t.dataset.k !== "ease") || t.dataset.bz !== undefined) {
     editKeyField(t);
   }
 });
@@ -404,6 +410,9 @@ $("#editor").addEventListener("change", (ev) => {
   const k = t.dataset.c;
   if (k === "duration") { c.duration = clamp(parseFloat(t.value) || 1, 1, 3600); showChanged({ structure: true }); renderEditor(); }
   else if (k === "fade") { c.fade = clamp(parseFloat(t.value) || 0, 0, 60); showChanged(); }
+  else if (k === "bpm") { c.bpm = clamp(parseFloat(t.value) || 0, 0, 300); if (!c.bpm && !["quarter_s", "off"].includes(c.snap)) c.snap = "quarter_s"; showChanged(); renderEditor(); }
+  else if (k === "beats_per_bar") { c.beats_per_bar = clamp(parseInt(t.value, 10) || 4, 1, 16); showChanged(); }
+  else if (k === "snap") { c.snap = t.value; showChanged(); }
   else if (k === "pattern") { c.pattern = t.value; c.params = { ...patternDefaults(t.value), ...c.params }; if (t.value === "pose" && !c.params.values) c.params.values = patternDefaults("pose").values; showChanged(); renderEditor(); }
   else if (k === "mode" || k === "stagger_by") { c[k] = t.value; showChanged(); renderEditor(); }
   else if (t.dataset.pb) { c.params[t.dataset.pb] = t.checked; showChanged(); }
@@ -419,7 +428,7 @@ $("#editor").addEventListener("change", (ev) => {
     showChanged(); if (f === "enabled") renderEditor();
   }
   else if (t.dataset.cb) { c[t.dataset.cb] = t.checked; showChanged(); }
-  else if (t.dataset.k === "ease") { if (S.selKey) { S.selKey[2] = t.value; showChanged(); } }
+  else if (t.dataset.k === "ease") { if (t.value) setEase(c, t.value); }
   else if (t.dataset.p === "count") { renderEditor(); }
   else if (t.type === "number" && (t.dataset.p !== undefined || t.dataset.pose !== undefined || t.dataset.c === "stagger")) {
     t.value = fmtNum(clamp(parseFloat(t.value) || 0, parseFloat(t.min), parseFloat(t.max)), parseFloat(t.step));   // tidy on commit
@@ -427,7 +436,7 @@ $("#editor").addEventListener("change", (ev) => {
 });
 $("#editor").addEventListener("click", (ev) => {
   const t = ev.target.closest("button"), c = clipById(S.selClip); if (!c || !t) return;
-  if (t.dataset.motor !== undefined) { S.selMotor = +t.dataset.motor; S.selKey = null; renderEditor(); return; }
+  if (t.dataset.motor !== undefined) { S.selMotor = +t.dataset.motor; setSel([]); renderEditor(); return; }
   if (t.dataset.lact) {
     const i = +t.dataset.li, a = t.dataset.lact, Ls = c.layers;
     if (a === "add") {
@@ -452,38 +461,54 @@ $("#editor").addEventListener("click", (ev) => {
     S.show.playlist = S.show.playlist.filter((e) => e.clip !== c.id);
     S.selClip = S.show.clips[0]?.id ?? null; showChanged({ structure: true }); renderEditor();
   } else if (act === "makeOwn") { c.tracks[String(S.selMotor)] = JSON.parse(JSON.stringify(c.tracks.all || [])); showChanged(); renderEditor(); }
-  else if (act === "useShared") { delete c.tracks[String(S.selMotor)]; S.selKey = null; showChanged(); renderEditor(); }
+  else if (act === "useShared") { delete c.tracks[String(S.selMotor)]; setSel([]); showChanged(); renderEditor(); }
   else if (act === "copyToAll") {
     const src = c.tracks[String(S.selMotor)];
     c.tracks.all = JSON.parse(JSON.stringify(src));
     for (let i = 0; i < nMotors(); i++) if (i !== S.selMotor) delete c.tracks[String(i)];
-    delete c.tracks[String(S.selMotor)]; c.mode = "shared"; S.selKey = null; showChanged(); renderEditor();
+    delete c.tracks[String(S.selMotor)]; c.mode = "shared"; setSel([]); showChanged(); renderEditor();
   } else if (act === "delKey") deleteSelectedKey();
+  else if (act === "copyKeys") copyKeys();
+  else if (act === "pasteKeys") pasteKeys();
+  else if (act === "selAll") { setSel([...activeTrack(c)]); updateKeyBox(); }
 });
 
 // ---- keyframe helpers (mirror of motion.py) ----
-function ease(kind, u) {
+// A key is [time, value, ease] or [time, value, "bezier", {bz: [x1, y1, x2, y2]}]; the ease shapes
+// the segment AFTER the key.
+const DEFAULT_BZ = [0.4, 0, 0.6, 1];
+function cubicBezier(u, x1, y1, x2, y2) {
+  x1 = clamp(x1); x2 = clamp(x2);
+  const bx = (s) => 3 * x1 * s * (1 - s) ** 2 + 3 * x2 * s * s * (1 - s) + s ** 3;
+  const by = (s) => 3 * y1 * s * (1 - s) ** 2 + 3 * y2 * s * s * (1 - s) + s ** 3;
+  let lo = 0, hi = 1, s = u;
+  for (let i = 0; i < 30; i++) { const xs = bx(s); if (Math.abs(xs - u) < 1e-6) break; if (xs < u) lo = s; else hi = s; s = (lo + hi) / 2; }
+  return by(s);
+}
+function ease(kind, u, bz) {
   u = clamp(u);
+  if (kind === "bezier") { const b = bz && bz.length === 4 ? bz : DEFAULT_BZ; return cubicBezier(u, ...b); }
   if (kind === "linear") return u;
   if (kind === "ease_in") return u * u * u;
   if (kind === "ease_out") return 1 - (1 - u) ** 3;
   if (kind === "hold") return 0;
   return u * u * u * (u * (u * 6 - 15) + 10);
 }
+const keyBz = (k) => (k[3] && k[3].bz) || null;
 function evalTrack(keys, t, dur, wrap) {
   if (!keys?.length) return 0;
   let ks = [...keys].sort((a, b) => a[0] - b[0]);
   if (wrap && dur > 0) {
     t = ((t % dur) + dur) % dur;
     const f = ks[0], l = ks[ks.length - 1];
-    ks = [[l[0] - dur, l[1], l[2] || "smooth"], ...ks, [f[0] + dur, f[1], f[2] || "smooth"]];
+    ks = [[l[0] - dur, l[1], l[2] || "smooth", l[3]], ...ks, [f[0] + dur, f[1], f[2] || "smooth", f[3]]];
   } else {
     if (t <= ks[0][0]) return ks[0][1];
     if (t >= ks[ks.length - 1][0]) return ks[ks.length - 1][1];
   }
   for (let i = 0; i < ks.length - 1; i++) {
     const a = ks[i], b = ks[i + 1];
-    if (a[0] <= t && t <= b[0]) { const span = b[0] - a[0]; const u = span <= 0 ? 0 : (t - a[0]) / span; return a[1] + (b[1] - a[1]) * ease(a[2] || "smooth", u); }
+    if (a[0] <= t && t <= b[0]) { const span = b[0] - a[0]; const u = span <= 0 ? 0 : (t - a[0]) / span; return a[1] + (b[1] - a[1]) * ease(a[2] || "smooth", u, keyBz(a)); }
   }
   return ks[ks.length - 1][1];
 }
@@ -492,34 +517,105 @@ function activeTrack(c) {
   c.tracks.all = c.tracks.all || [[0, 0.5, "smooth"]];
   return c.tracks.all;
 }
-const EASE_LABEL = { smooth: "S-curve", linear: "Linear", ease_in: "Ease in", ease_out: "Ease out", hold: "Hold (step)" };
+// the key after k on its track (wrapping), so a segment's custom-curve handles can be drawn
+function nextKey(tr, k, c) {
+  const i = tr.indexOf(k);
+  if (i < tr.length - 1) return [tr[i + 1], 0];
+  return c.wrap !== false && tr.length > 1 ? [tr[0], c.duration] : [null, 0];
+}
+const EASE_LABEL = { smooth: "S-curve", linear: "Linear", ease_in: "Ease in", ease_out: "Ease out", hold: "Hold (step)", bezier: "Custom curve" };
+
+// ---- selection: S.sel holds every selected key on the active curve; S.selKey is the one last clicked
+function selected(c) { const tr = activeTrack(c); S.sel = (S.sel || []).filter((k) => tr.includes(k)); if (S.selKey && !tr.includes(S.selKey)) S.selKey = null; return S.sel; }
+function setSel(keys, primary) { S.sel = [...new Set(keys)]; S.selKey = primary ?? S.sel[S.sel.length - 1] ?? null; }
+
+// ---- tempo grid and snapping
+const SNAP_LABEL = { quarter_s: "¼ second", off: "Off", bar: "Bar", beat: "Beat", half: "½ beat", quarter: "¼ beat" };
+function snapStep(c) {
+  const bpm = +c.bpm || 0, snap = c.snap || (bpm ? "beat" : "quarter_s"), beat = bpm ? 60 / bpm : 0;
+  if (snap === "off") return 0;
+  if (!bpm || snap === "quarter_s") return 0.25;
+  return { bar: beat * (+c.beats_per_bar || 4), beat, half: beat / 2, quarter: beat / 4 }[snap] || beat;
+}
+function snapT(c, t, free) { const st = snapStep(c); return free || !st ? t : Math.round(t / st) * st; }
+
 function updateKeyBox() {
   const box = $("#keybox"); if (!box) return;
   const c = clipById(S.selClip);
-  const tr = activeTrack(c);
-  if (!S.selKey || !tr.includes(S.selKey)) {
-    S.selKey = null;
-    box.innerHTML = sec("Keyframe") + `<div class="p-full"><span class="note" style="margin:0">None selected · ${tr.length} key${tr.length === 1 ? "" : "s"} on this curve</span></div>`;
+  const tr = activeTrack(c), sel = selected(c);
+  const clipBtns = `<button class="btn small" data-act="selAll">Select All</button>
+    <button class="btn small" data-act="copyKeys" ${sel.length ? "" : "disabled"}>Copy</button>
+    <button class="btn small" data-act="pasteKeys" ${S.keyClip?.length ? "" : "disabled"} title="Paste at the last clicked time">Paste${S.keyClip?.length ? ` (${S.keyClip.length})` : ""}</button>`;
+  if (!sel.length) {
+    box.innerHTML = sec("Keyframes") + `<div class="p-full"><span class="note" style="margin:0">None selected · ${tr.length} key${tr.length === 1 ? "" : "s"} on this curve</span></div>` +
+      `<div class="p-full">${clipBtns}</div>`;
     return;
   }
-  const k = S.selKey;
+  if (sel.length > 1) {
+    const eases = new Set(sel.map((k) => k[2] || "smooth"));
+    box.innerHTML = sec(`${sel.length} keyframes selected`) +
+      prop(`<label for="k_e">Transition</label>`, `<select id="k_e" data-k="ease">${eases.size > 1 ? `<option value="" selected>(mixed)</option>` : ""}${S.eases.map((e) =>
+        `<option value="${e}" ${eases.size === 1 && eases.has(e) ? "selected" : ""}>${EASE_LABEL[e] || e}</option>`).join("")}</select>`) +
+      `<div class="p-full">${clipBtns}<button class="btn small" data-act="delKey">Delete ${sel.length}</button></div>
+       <div class="p-full"><span class="note" style="margin:0">Drag any of them to move all · Arrow keys nudge (Shift = more)</span></div>`;
+    return;
+  }
+  const k = sel[0];
+  const bz = keyBz(k) || DEFAULT_BZ;
   box.innerHTML = sec(`Keyframe ${tr.indexOf(k) + 1} of ${tr.length}`) +
     prop(`<label for="k_t">Time</label>`, `<input type="number" class="num" id="k_t" data-k="t" step="0.05" min="0" max="${c.duration}" value="${k[0].toFixed(2)}"><span class="unit">s</span>`) +
-    prop(`<label for="k_v">Height</label>`, `<input type="number" class="num" id="k_v" data-k="v" step="0.01" min="0" max="1" value="${k[1].toFixed(2)}"><span class="unit">0–1</span>`) +
+    prop(`<label for="k_v">Position</label>`, `<input type="number" class="num" id="k_v" data-k="v" step="0.01" min="0" max="1" value="${k[1].toFixed(2)}"><span class="unit">0–1</span>`) +
     prop(`<label for="k_e">Transition</label>`, `<select id="k_e" data-k="ease">${S.eases.map((e) => `<option value="${e}" ${e === (k[2] || "smooth") ? "selected" : ""}>${EASE_LABEL[e] || e}</option>`).join("")}</select>`) +
-    `<div class="p-full"><button class="btn small" data-act="delKey">Delete Keyframe</button></div>`;
+    ((k[2] === "bezier") ? prop(`<label>Curve handles</label>`, `<div class="bzrow">` + ["x1", "y1", "x2", "y2"].map((n, i) =>
+      `<input type="number" class="num" data-bz="${i}" step="0.05" min="${i % 2 ? -1 : 0}" max="${i % 2 ? 2 : 1}" value="${bz[i].toFixed(2)}" aria-label="${n}" title="${n}">`).join("") + `</div>`,
+      "Drag the two yellow handles on the profile, or type them (like CSS cubic-bezier). y outside 0–1 overshoots.") : "") +
+    `<div class="p-full">${clipBtns}<button class="btn small" data-act="delKey">Delete Keyframe</button></div>`;
 }
 function editKeyField(t) {
   const c = clipById(S.selClip), k = S.selKey; if (!k || t.value === "") return;
   if (t.dataset.k === "t") k[0] = clamp(parseFloat(t.value) || 0, 0, c.duration);
   if (t.dataset.k === "v") k[1] = clamp(parseFloat(t.value) || 0);
+  if (t.dataset.bz !== undefined) {
+    const bz = [...(keyBz(k) || DEFAULT_BZ)], i = +t.dataset.bz;
+    bz[i] = i % 2 ? clamp(parseFloat(t.value) || 0, -1, 2) : clamp(parseFloat(t.value) || 0);
+    k[3] = { ...(k[3] || {}), bz };
+  }
   activeTrack(c).sort((a, b) => a[0] - b[0]);
   showChanged();
 }
+function setEase(c, kind) {
+  for (const k of selected(c)) {
+    k[2] = kind;
+    if (kind === "bezier") k[3] = { ...(k[3] || {}), bz: keyBz(k) || [...DEFAULT_BZ] };
+    else if (k.length > 3) k.length = 3;
+  }
+  showChanged(); updateKeyBox();
+}
 function deleteSelectedKey() {
-  const c = clipById(S.selClip); const tr = activeTrack(c);
-  if (!S.selKey || tr.length <= 1) { toast("A curve needs at least one keyframe", true); return; }
-  tr.splice(tr.indexOf(S.selKey), 1); S.selKey = null; updateKeyBox(); showChanged();
+  const c = clipById(S.selClip); const tr = activeTrack(c), sel = selected(c);
+  if (!sel.length) return;
+  if (tr.length - sel.length < 1) { toast("A curve needs at least one keyframe", true); return; }
+  for (const k of sel) tr.splice(tr.indexOf(k), 1);
+  setSel([]); updateKeyBox(); showChanged();
+}
+function copyKeys() {
+  const c = clipById(S.selClip), sel = [...selected(c)].sort((a, b) => a[0] - b[0]);
+  if (!sel.length) return;
+  const t0 = sel[0][0];
+  S.keyClip = sel.map((k) => [k[0] - t0, k[1], k[2] || "smooth", ...(k[3] ? [JSON.parse(JSON.stringify(k[3]))] : [])]);
+  toast(`Copied ${sel.length} keyframe${sel.length === 1 ? "" : "s"}`); updateKeyBox();
+}
+function pasteKeys() {
+  const c = clipById(S.selClip); if (!c || c.type !== "timeline" || !S.keyClip?.length) return;
+  const tr = activeTrack(c), at = snapT(c, S.lastT ?? 0, false), added = [];
+  for (const k of S.keyClip) {
+    const t = at + k[0]; if (t > c.duration + 1e-9) continue;
+    const old = tr.find((x) => Math.abs(x[0] - t) < 1e-6); if (old) tr.splice(tr.indexOf(old), 1);   // replace a key at the same time
+    const nk = [t, k[1], k[2], ...(k[3] ? [JSON.parse(JSON.stringify(k[3]))] : [])];
+    tr.push(nk); added.push(nk);
+  }
+  tr.sort((a, b) => a[0] - b[0]); setSel(added); updateKeyBox(); showChanged();
+  toast(added.length ? `Pasted ${added.length} at ${fmtTimeTenths(at)}` : "Nothing fits after that time", !added.length);
 }
 
 // ------------------------------------------------------------ render (sampled motion from the Pi)
@@ -645,13 +741,28 @@ function drawScore() {
     ctx.beginPath(); ctx.moveTo(g.L, y); ctx.lineTo(W - g.R, y); ctx.stroke();
     ctx.fillStyle = SCOPE.axis; ctx.textAlign = "right"; ctx.fillText(k === 0 ? "HOME" : k === 4 ? "FAR" : (k / 4).toFixed(2), g.L - 6, y + 4);
   }
-  const stepT = dur > 600 ? 60 : dur > 240 ? 30 : dur > 90 ? 10 : dur > 20 ? 5 : dur > 8 ? 2 : 1;
-  ctx.textAlign = "center";
-  for (let t = 0; t <= dur + 1e-6; t += stepT) {
-    const x = Math.round(g.tx(t)) + 0.5;
-    ctx.strokeStyle = t % (stepT * 5) === 0 ? SCOPE.gridMajor : SCOPE.grid;
-    ctx.beginPath(); ctx.moveTo(x, g.T); ctx.lineTo(x, H - g.B); ctx.stroke();
-    ctx.fillStyle = SCOPE.axis; ctx.textAlign = x > W - g.R - 16 ? "right" : "center"; ctx.fillText(fmtTime(t), Math.min(x, W - 4), H - 9);
+  const bpm = c.type === "timeline" ? +c.bpm || 0 : 0;
+  if (bpm) {
+    // beat grid: a line per beat (per bar when beats get too dense), bar numbers along the bottom
+    const beat = 60 / bpm, bpb = +c.beats_per_bar || 4, pxBeat = g.tx(beat) - g.tx(0);
+    const every = pxBeat >= 8 ? 1 : bpb, barEvery = Math.max(1, Math.ceil(28 / (pxBeat * bpb)));
+    ctx.textAlign = "center";
+    for (let b = 0; b * beat <= dur + 1e-6; b += every) {
+      const x = Math.round(g.tx(b * beat)) + 0.5, isBar = b % bpb === 0;
+      ctx.strokeStyle = isBar ? SCOPE.gridMajor : SCOPE.grid;
+      ctx.beginPath(); ctx.moveTo(x, g.T); ctx.lineTo(x, H - g.B); ctx.stroke();
+      const bar = b / bpb;
+      if (isBar && bar % barEvery === 0 && x < W - g.R - 30) { ctx.fillStyle = SCOPE.axis; ctx.textAlign = x > W - g.R - 16 ? "right" : "center"; ctx.fillText(`bar ${bar + 1}`, Math.min(x, W - 4), H - 9); }
+    }
+  } else {
+    const stepT = dur > 600 ? 60 : dur > 240 ? 30 : dur > 90 ? 10 : dur > 20 ? 5 : dur > 8 ? 2 : 1;
+    ctx.textAlign = "center";
+    for (let t = 0; t <= dur + 1e-6; t += stepT) {
+      const x = Math.round(g.tx(t)) + 0.5;
+      ctx.strokeStyle = t % (stepT * 5) === 0 ? SCOPE.gridMajor : SCOPE.grid;
+      ctx.beginPath(); ctx.moveTo(x, g.T); ctx.lineTo(x, H - g.B); ctx.stroke();
+      ctx.fillStyle = SCOPE.axis; ctx.textAlign = x > W - g.R - 16 ? "right" : "center"; ctx.fillText(fmtTime(t), Math.min(x, W - 4), H - 9);
+    }
   }
   // server-rendered motion of every axis
   const r = S.renderFor === c.id ? S.render : null;
@@ -678,11 +789,29 @@ function drawScore() {
     ctx.strokeStyle = SCOPE.hi; ctx.lineWidth = 1.8; ctx.beginPath();
     for (let px = 0; px <= 400; px++) { const t = (px / 400) * dur; const x = g.tx(t), y = g.vy(clamp(evalTrack(tr, t, dur, wrap))); px ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
     ctx.stroke();
+    const sel = selected(c);
     for (const k of tr) {
-      const x = Math.round(g.tx(k[0])), y = Math.round(g.vy(k[1])), sel = k === S.selKey, s = sel ? 5 : 4;
-      ctx.fillStyle = sel ? SCOPE.keySel : SCOPE.bg; ctx.strokeStyle = sel ? SCOPE.keySel : SCOPE.key; ctx.lineWidth = 1.5;
+      const x = Math.round(g.tx(k[0])), y = Math.round(g.vy(k[1])), on = sel.includes(k), s = on ? 5 : 4;
+      ctx.fillStyle = on ? SCOPE.keySel : SCOPE.bg; ctx.strokeStyle = on ? SCOPE.keySel : SCOPE.key; ctx.lineWidth = 1.5;
       ctx.fillRect(x - s, y - s, s * 2, s * 2); ctx.strokeRect(x - s + 0.5, y - s + 0.5, s * 2 - 1, s * 2 - 1);
-      if (sel) { ctx.fillStyle = SCOPE.key; ctx.font = MONO; ctx.textAlign = "left"; ctx.fillText(`${k[0].toFixed(2)} s, ${k[1].toFixed(2)}`, x + 9, y - 8); }
+      if (on && sel.length === 1) { ctx.fillStyle = SCOPE.key; ctx.font = MONO; ctx.textAlign = "left"; ctx.fillText(`${k[0].toFixed(2)} s, ${k[1].toFixed(2)}`, x + 9, y - 8); }
+    }
+    // custom-curve handles for the one selected key
+    const hs = bezierHandles(c, g);
+    if (hs) {
+      ctx.strokeStyle = SCOPE.keySel; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(hs.a[0], hs.a[1]); ctx.lineTo(hs.h[0][0], hs.h[0][1]);
+      ctx.moveTo(hs.b[0], hs.b[1]); ctx.lineTo(hs.h[1][0], hs.h[1][1]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = SCOPE.keySel;
+      for (const [hx, hy] of hs.h) { ctx.beginPath(); ctx.arc(hx, hy, 5, 0, Math.PI * 2); ctx.fill(); }
+    }
+    if (S.marquee) {
+      const m = S.marquee; ctx.strokeStyle = SCOPE.keySel; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+      ctx.strokeRect(Math.min(m.x0, m.x1) + 0.5, Math.min(m.y0, m.y1) + 0.5, Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0)); ctx.setLineDash([]);
+    }
+    if (S.lastT != null && S.lastT <= dur) {   // paste point
+      const x = Math.round(g.tx(snapT(c, S.lastT))) + 0.5;
+      ctx.fillStyle = SCOPE.keySel; ctx.beginPath(); ctx.moveTo(x - 4, g.T - 1); ctx.lineTo(x + 4, g.T - 1); ctx.lineTo(x, g.T + 5); ctx.fill();
     }
   }
   // playhead
@@ -693,6 +822,15 @@ function drawScore() {
   }
 }
 
+// screen positions of a bezier key's segment and its two handles (null unless exactly one bezier key is selected)
+function bezierHandles(c, g) {
+  const sel = selected(c); if (sel.length !== 1 || sel[0][2] !== "bezier") return null;
+  const a = sel[0], [b, shift] = nextKey(activeTrack(c), a, c); if (!b) return null;
+  const t0 = a[0], t1 = b[0] + shift, v0 = a[1], v1 = b[1], bz = keyBz(a) || DEFAULT_BZ;
+  const pt = (x, y) => [g.tx(t0 + x * (t1 - t0)), g.vy(v0 + y * (v1 - v0))];
+  return { a: pt(0, 0), b: pt(1, 1), h: [pt(bz[0], bz[1]), pt(bz[2], bz[3])], t0, t1, v0, v1, key: a };
+}
+
 // profile interactions (timeline clips)
 (function scoreInput() {
   const cv = $("#score"); let drag = null;
@@ -701,30 +839,102 @@ function drawScore() {
   cv.addEventListener("pointerdown", (ev) => {
     const [c, g] = ctxInfo(); if (!c) return;
     const [x, y] = pos(ev);
-    const hit = activeTrack(c).find((k) => Math.hypot(g.tx(k[0]) - x, g.vy(k[1]) - y) < 10);
-    S.selKey = hit || null; updateKeyBox();
-    if (hit) { drag = hit; cv.setPointerCapture(ev.pointerId); }
     cv.focus();
+    S.lastT = clamp(g.xt(x), 0, c.duration);
+    // a curve handle?
+    const hs = bezierHandles(c, g);
+    const hi = hs ? hs.h.findIndex(([hx, hy]) => Math.hypot(hx - x, hy - y) < 9) : -1;
+    if (hi >= 0) { drag = { handle: hi, hs }; cv.setPointerCapture(ev.pointerId); return; }
+    const hit = activeTrack(c).find((k) => Math.hypot(g.tx(k[0]) - x, g.vy(k[1]) - y) < 10);
+    const sel = selected(c);
+    if (hit) {
+      if (ev.shiftKey) { setSel(sel.includes(hit) ? sel.filter((k) => k !== hit) : [...sel, hit], hit); updateKeyBox(); return; }
+      if (!sel.includes(hit)) setSel([hit]); else S.selKey = hit;
+      // move every selected key together, relative to where each started
+      drag = { keys: selected(c).map((k) => [k, k[0], k[1]]), hit, t0: hit[0], v0: hit[1], x, y, moved: false };
+      cv.setPointerCapture(ev.pointerId);
+    } else {
+      drag = { marquee: true, base: ev.shiftKey ? [...sel] : [] };
+      if (!ev.shiftKey) setSel([]);
+      S.marquee = { x0: x, y0: y, x1: x, y1: y };
+      cv.setPointerCapture(ev.pointerId);
+    }
+    updateKeyBox();
   });
   cv.addEventListener("pointermove", (ev) => {
     if (!drag) return;
-    const [c, g] = ctxInfo(); const [x, y] = pos(ev);
-    let t = clamp(g.xt(x), 0, c.duration); if (!ev.altKey) t = Math.round(t * 4) / 4;
-    drag[0] = t; drag[1] = clamp(Math.round(g.yv(y) * 100) / 100);
+    const [c, g] = ctxInfo(); if (!c) return;
+    const [x, y] = pos(ev);
+    if (drag.handle !== undefined) {
+      const { hs } = drag, k = hs.key, bz = [...(keyBz(k) || DEFAULT_BZ)];
+      const span = hs.t1 - hs.t0, dv = hs.v1 - hs.v0;
+      bz[drag.handle * 2] = Math.round(clamp((g.xt(x) - hs.t0) / span) * 100) / 100;
+      if (Math.abs(dv) > 1e-6) bz[drag.handle * 2 + 1] = Math.round(clamp((g.yv(y) - hs.v0) / dv, -1, 2) * 100) / 100;
+      k[3] = { ...(k[3] || {}), bz };
+      updateKeyBox(); return;
+    }
+    if (drag.marquee) {
+      Object.assign(S.marquee, { x1: x, y1: y });
+      const m = S.marquee, inBox = (k) => {
+        const kx = g.tx(k[0]), ky = g.vy(k[1]);
+        return kx >= Math.min(m.x0, m.x1) && kx <= Math.max(m.x0, m.x1) && ky >= Math.min(m.y0, m.y1) && ky <= Math.max(m.y0, m.y1);
+      };
+      setSel([...drag.base, ...activeTrack(c).filter(inBox)]); updateKeyBox(); return;
+    }
+    if (!drag.moved && Math.hypot(x - drag.x, y - drag.y) < 3) return;   // a click, not a drag
+    drag.moved = true;
+    // snap the clicked key, then shift the rest by the same amount (keeping the group inside the clip)
+    let dt = snapT(c, clamp(g.xt(x), 0, c.duration), ev.altKey) - drag.t0;
+    let dv = Math.round((clamp(g.yv(y)) - drag.v0) * 100) / 100;
+    const ts = drag.keys.map((e) => e[1]), vs = drag.keys.map((e) => e[2]);
+    dt = clamp(dt, -Math.min(...ts), c.duration - Math.max(...ts));
+    dv = clamp(dv, -Math.min(...vs), 1 - Math.max(...vs));
+    for (const [k, t, v] of drag.keys) { k[0] = t + dt; k[1] = Math.round((v + dv) * 1000) / 1000; }
     updateKeyBox();
   });
-  cv.addEventListener("pointerup", () => {
+  const end = () => {
     if (!drag) return;
-    const [c] = ctxInfo(); activeTrack(c).sort((a, b) => a[0] - b[0]); drag = null; updateKeyBox(); showChanged();
-  });
+    const [c] = ctxInfo();
+    if (c) {
+      if (drag.marquee) S.marquee = null;
+      else { activeTrack(c).sort((a, b) => a[0] - b[0]); if (drag.moved || drag.handle !== undefined) showChanged(); }
+    }
+    drag = null; updateKeyBox();
+  };
+  cv.addEventListener("pointerup", end);
+  cv.addEventListener("pointercancel", end);
   cv.addEventListener("dblclick", (ev) => {
     const [c, g] = ctxInfo(); if (!c) return;
     const [x, y] = pos(ev);
-    const k = [clamp(Math.round(g.xt(x) * 4) / 4, 0, c.duration), clamp(Math.round(g.yv(y) * 100) / 100), "smooth"];
+    if (activeTrack(c).some((k) => Math.hypot(g.tx(k[0]) - x, g.vy(k[1]) - y) < 10)) return;   // double-clicked a key
+    const k = [snapT(c, clamp(g.xt(x), 0, c.duration), ev.altKey), clamp(Math.round(g.yv(y) * 100) / 100), "smooth"];
     const tr = activeTrack(c); tr.push(k); tr.sort((a, b) => a[0] - b[0]);
-    S.selKey = k; updateKeyBox(); showChanged();
+    setSel([k]); updateKeyBox(); showChanged();
   });
-  cv.addEventListener("keydown", (ev) => { if ((ev.key === "Delete" || ev.key === "Backspace") && S.selKey) { ev.preventDefault(); deleteSelectedKey(); } });
+  cv.addEventListener("keydown", (ev) => {
+    const [c] = ctxInfo(); if (!c) return;
+    const mod = ev.ctrlKey || ev.metaKey, key = ev.key.toLowerCase(), sel = selected(c);
+    if ((ev.key === "Delete" || ev.key === "Backspace") && sel.length) { ev.preventDefault(); deleteSelectedKey(); }
+    else if (mod && key === "c") { ev.preventDefault(); copyKeys(); }
+    else if (mod && key === "v") { ev.preventDefault(); pasteKeys(); }
+    else if (mod && key === "a") { ev.preventDefault(); setSel([...activeTrack(c)]); updateKeyBox(); }
+    else if (ev.key === "Escape") { setSel([]); updateKeyBox(); }
+    else if (ev.key.startsWith("Arrow") && sel.length) {
+      ev.preventDefault();
+      const big = ev.shiftKey ? 10 : 1;
+      if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
+        let dt = (snapStep(c) || 0.05) * big * (ev.key === "ArrowLeft" ? -1 : 1);
+        dt = clamp(dt, -Math.min(...sel.map((k) => k[0])), c.duration - Math.max(...sel.map((k) => k[0])));
+        for (const k of sel) k[0] = Math.round((k[0] + dt) * 1000) / 1000;
+        activeTrack(c).sort((a, b) => a[0] - b[0]);
+      } else {
+        let dv = 0.01 * big * (ev.key === "ArrowUp" ? 1 : -1);
+        dv = clamp(dv, -Math.min(...sel.map((k) => k[1])), 1 - Math.max(...sel.map((k) => k[1])));
+        for (const k of sel) k[1] = Math.round((k[1] + dv) * 1000) / 1000;
+      }
+      updateKeyBox(); showChanged();
+    }
+  });
 })();
 
 // ------------------------------------------------------------ title bar, toolbar, status bar

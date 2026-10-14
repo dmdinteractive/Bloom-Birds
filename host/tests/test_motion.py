@@ -219,3 +219,19 @@ def test_layers_blend_modes_and_targets():
     assert abs(v[1] - 0.28) < 1e-9                                   # 0.4 * 0.7
     lay["layers"].append({"clip": "missing"})                        # dangling references are ignored
     assert len(M.eval_clip(lay, 1.0, ms, ctx)) == 2
+
+
+def test_cubic_bezier_matches_known_points():
+    # linear control points give a straight line; ease-in-out is symmetric about the middle
+    for u in (0.0, 0.25, 0.5, 0.75, 1.0):
+        assert abs(M.cubic_bezier(u, 0.25, 0.25, 0.75, 0.75) - u) < 1e-4
+    assert abs(M.cubic_bezier(0.5, 0.42, 0.0, 0.58, 1.0) - 0.5) < 1e-4
+    assert M.cubic_bezier(0.2, 0.42, 0.0, 0.58, 1.0) < 0.2            # slow start
+    assert M.cubic_bezier(0.6, 0.3, 1.6, 0.7, 1.0) > 1.0              # overshoot
+
+
+def test_bezier_key_in_track_and_wrap():
+    keys = [[0, 0.0, "bezier", {"bz": [0.0, 1.0, 0.0, 1.0]}], [10, 1.0, "smooth"]]
+    assert M.eval_track(keys, 2.0, 10, False) > 0.6                  # fast early rise
+    keys_w = [[0, 0.0, "smooth"], [5, 1.0, "bezier", {"bz": [1.0, 0.0, 1.0, 0.0]}]]
+    assert M.eval_track(keys_w, 7.0, 10, True) > 0.9                 # wrap segment uses the last key's curve

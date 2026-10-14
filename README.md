@@ -311,9 +311,21 @@ Over everything, plus a fast "Flutter" clip Added only to the Wings group.
 
 **Timeline clips** are keyframe curves:
 
-- Double-click the graph to add a key, and drag to move it (snaps to 0.25 s; hold Alt to
+- Double-click the graph to add a key, and drag to move it (snaps to the grid; hold Alt to
   place freely).
-- Select a key to set its ease: smooth, linear, ease in/out, or hold.
+- **Selecting several keys:** Shift-click keys, or drag a box on an empty part of the graph.
+  Dragging any selected key moves them all. Ctrl/⌘+A selects every key on the curve, Esc clears.
+- **Copy and paste:** Ctrl/⌘+C copies the selected keys; click where they should go and press
+  Ctrl/⌘+V (a small yellow arrow at the top of the graph marks the paste point). Handy for
+  repeating a phrase such as one wing beat.
+- **Nudging:** arrow keys move the selected keys by one grid step left/right or 0.01 up/down.
+  Hold Shift for ten times as much. Delete removes them.
+- Select a key to set its **transition** into the next key: S-curve, linear, ease in/out,
+  hold (step), or **Custom curve**. A custom curve shows two yellow handles on the graph that
+  you drag to shape the move (fast start, slow settle, or even overshoot). The four numbers
+  work like CSS `cubic-bezier()`.
+- **Grid:** set a **Tempo** in BPM to see beats and bar numbers, and snap keys to bars, beats,
+  ½ or ¼ beats. With tempo at 0 the grid is in seconds and snaps to ¼ s.
 - **Stagger** delays the same curve across motors, turning one curve into a wave. Order it
   by motor number, left-to-right, or center-out.
 - Switch to **Separate curve per motor** to hand-animate individual motors.
@@ -362,7 +374,7 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 66 automated tests. They include:
+- **Pi software** is covered by 67 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;
