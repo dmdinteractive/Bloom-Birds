@@ -255,3 +255,10 @@ p.note.p-full { display: block; }
 #trigRecent tr.fresh td { background: #fbf3dc; }
 @media (max-width: 900px) { .trig-grid { grid-template-columns: 1fr; } }
 .trig-table input.num { width: 64px; }
+
+/* stroke fit readout (Clip Properties) */
+.fitbox:empty { display: none; }
+.fitbox { padding: 5px 6px; border-bottom: 1px solid #eceef0; background: #f6f8fa; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.fit-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.fit-line .sub, .fit-line.sub { color: var(--ink-3); font-size: 11px; }
+.fit-line.warn { color: #b26a00; font-weight: 600; }

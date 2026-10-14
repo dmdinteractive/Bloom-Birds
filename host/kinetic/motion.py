@@ -26,23 +26,46 @@ def smootherstep(u: float) -> float:
     return u * u * u * (u * (u * 6 - 15) + 10)
 
 
-def periodic(u: float, dwell: float = 0.0) -> float:
+def trapezoid(u: float, ramp: float) -> float:
+    """Fastest-stroke profile: position 0 -> 1 over u = 0 -> 1 with constant acceleration for
+    the first `ramp` share, constant top speed in the middle, and constant braking at the end.
+    For a given speed and acceleration limit this covers a stroke in the least time; the
+    optimum ramp is (v/a) / (D/v + v/a) for stroke D (see stroke_fit)."""
+    r = clamp(ramp, 0.02, 0.5)
+    u = clamp(u)
+    vpk = 1.0 / (1.0 - r)               # top speed, in strokes per stroke-time
+    if u < r:
+        return vpk * u * u / (2 * r)
+    if u <= 1 - r:
+        return vpk * (u - r / 2)
+    return 1.0 - vpk * (1 - u) ** 2 / (2 * r)
+
+
+def rise(u: float, shape: str = "sine", ramp: float = 0.25) -> float:
+    """One stroke from -1 to +1 as u goes 0 -> 1."""
+    if shape == "fast":
+        return -1.0 + 2.0 * trapezoid(u, ramp)
+    return -math.cos(math.pi * clamp(u))
+
+
+def periodic(u: float, dwell: float = 0.0, shape: str = "sine", ramp: float = 0.25) -> float:
     """Smooth periodic wave in [-1, 1] with optional dwell (pause) at top and bottom.
 
     dwell = 0 gives a pure -cos wave (starts at -1 = up).  dwell = 0.5 spends half of
     every cycle holding still at the extremes, which reads as "breathing" in kinetic art.
+    shape "fast" replaces each half of the sine with the fastest-stroke trapezoid.
     """
     d = clamp(dwell, 0.0, 0.9)
     r = (1.0 - d) / 2.0          # length of each moving half
     f = u - math.floor(u)
     if f < r:
-        return -math.cos(math.pi * f / r)
+        return rise(f / r, shape, ramp)
     f -= r
     if f < d / 2:
         return 1.0
     f -= d / 2
     if f < r:
-        return math.cos(math.pi * f / r)
+        return -rise(f / r, shape, ramp)
     return -1.0
 
 
@@ -60,12 +83,20 @@ def _normalize(vals: list[float]) -> list[float]:
 COMMON_PARAMS = [
     {"key": "center", "label": "Center height", "min": 0, "max": 1, "step": 0.01, "default": 0.5,
      "help": "Middle of the motion (0 = home, 1 = far end; continuous rotation: speed)"},
-    {"key": "amplitude", "label": "Amplitude", "min": 0, "max": 0.5, "step": 0.01, "default": 0.3,
-     "help": "How far each motor swings either side of the center"},
-    {"key": "period", "label": "Period (s)", "min": 1, "max": 120, "step": 0.5, "default": 12,
+    {"key": "amplitude", "label": "Stroke", "min": 0, "max": 0.5, "step": 0.005, "default": 0.3,
+     "scale": 200, "unit": "%",
+     "help": "Size of the movement as a share of each motor's taught length (100% = home to far end)"},
+    {"key": "period", "label": "Period (s)", "min": 0.2, "max": 120, "step": 0.1, "default": 12,
      "help": "Seconds for one full cycle"},
     {"key": "dwell", "label": "Dwell", "min": 0, "max": 0.8, "step": 0.01, "default": 0.0,
      "help": "Fraction of each cycle spent pausing at the top and bottom"},
+    {"key": "shape", "label": "Stroke shape", "type": "choice", "default": "sine",
+     "options": {"sine": "Smooth (sine)", "fast": "Fastest stroke"},
+     "only": ["breathe", "wave", "ripple", "spin", "alternate"],
+     "help": "Fastest covers the full stroke in the least time the motors allow"},
+    {"key": "ramp", "label": "Ramp", "min": 0.05, "max": 0.5, "step": 0.01, "default": 0.25,
+     "only": ["breathe", "wave", "ripple", "spin", "alternate"], "show_if": {"shape": "fast"},
+     "help": "Share of each stroke spent speeding up and slowing down; the rest is at top speed"},
 ]
 
 PATTERNS: dict[str, dict] = {
@@ -169,7 +200,12 @@ def eval_pattern(name: str, t: float, motors: list[dict], p: dict) -> list[float
     amp = float(_param(p, "amplitude", 0.3))
     period = max(0.1, float(_param(p, "period", 12)))
     dwell = float(_param(p, "dwell", 0.0))
+    shape = str(_param(p, "shape", "sine"))
+    ramp = float(_param(p, "ramp", 0.25))
     cyc = t / period
+
+    def wav(u: float) -> float:
+        return periodic(u, dwell, shape, ramp)
     xs = [m["x"] for m in motors]
     ys = [m["y"] for m in motors]
 
@@ -179,21 +215,21 @@ def eval_pattern(name: str, t: float, motors: list[dict], p: dict) -> list[float
         return [clamp(float(v)) for v in vals[:n]]
 
     if name == "breathe":
-        v = center + amp * periodic(cyc, dwell)
+        v = center + amp * wav(cyc)
         return [clamp(v)] * n
 
     if name == "wave":
         th = math.radians(float(_param(p, "direction", 0)))
         s = _normalize([x * math.cos(th) + y * math.sin(th) for x, y in zip(xs, ys)])
         k = float(_param(p, "wavelengths", 1))
-        return [clamp(center + amp * periodic(cyc - k * si, dwell)) for si in s]
+        return [clamp(center + amp * wav(cyc - k * si)) for si in s]
 
     if name == "ripple":
         ox, oy = float(_param(p, "origin_x", 0.5)), float(_param(p, "origin_y", 0.5))
         d = [math.hypot(x - ox, y - oy) for x, y in zip(xs, ys)]
         dmax = max(d) or 1.0
         k = float(_param(p, "wavelengths", 1)) * (-1 if p.get("inward") else 1)
-        return [clamp(center + amp * periodic(cyc - k * di / dmax, dwell)) for di in d]
+        return [clamp(center + amp * wav(cyc - k * di / dmax)) for di in d]
 
     if name == "spin":
         ox, oy = float(_param(p, "origin_x", 0.5)), float(_param(p, "origin_y", 0.5))
@@ -202,7 +238,7 @@ def eval_pattern(name: str, t: float, motors: list[dict], p: dict) -> list[float
         out = []
         for x, y in zip(xs, ys):
             a = math.atan2(y - oy, x - ox) / (2 * math.pi)
-            out.append(clamp(center + amp * periodic(cyc - sgn * turns * a, dwell)))
+            out.append(clamp(center + amp * wav(cyc - sgn * turns * a)))
         return out
 
     if name == "chase":
@@ -221,7 +257,7 @@ def eval_pattern(name: str, t: float, motors: list[dict], p: dict) -> list[float
 
     if name == "alternate":
         g = max(2, int(_param(p, "groups", 2)))
-        return [clamp(center + amp * periodic(cyc - (i % g) / g, dwell)) for i in range(n)]
+        return [clamp(center + amp * wav(cyc - (i % g) / g)) for i in range(n)]
 
     if name == "drift":
         coh = clamp(float(_param(p, "coherence", 0.6)))
@@ -615,9 +651,11 @@ class Limiter:
             self.x[i] = min(max(self.x[i], lo[i]), hi[i])
             if self.x[i] in (lo[i], hi[i]) and ((self.x[i] == lo[i] and self.v[i] < 0) or (self.x[i] == hi[i] and self.v[i] > 0)):
                 self.v[i] = 0.0
-            # "limited" = more than ~1% of the range (min tolerance) behind the design
-            self.limited[i] = abs(d - self.x[i]) > max(self.tol * 0.01 * max(hi[i] - lo[i], 1e-9), 1e-6) \
-                if self.tol_relative else abs(d - self.x[i]) > self.tol
+            # "limited" = more than ~1% of the range (min tolerance) behind the design, beyond
+            # the one-frame lag any follower has at speed
+            slack = 1.5 * abs(ff) * dt
+            self.limited[i] = abs(d - self.x[i]) > max(self.tol * 0.01 * max(hi[i] - lo[i], 1e-9), 1e-6) + slack \
+                if self.tol_relative else abs(d - self.x[i]) > self.tol + slack
         self.prev_desired = list(desired)
         return list(self.x), list(self.v)
 
@@ -631,9 +669,21 @@ def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax, amax,
     sim_dt = 1 / 50
     lim = Limiter(len(motors), vmax, amax, tolerance=0.5)
     lim.tol_relative = True
-    first = eval_clip(clip, 0.0, motors, ctx)
-    lim.reset([f * tr for f, tr in zip(first, travel)])
     zeros = [0.0] * len(motors)
+    # Pre-roll: clips loop, so show how the motors follow once they are moving, not the
+    # catch-up from standing still at t = 0 (the show crossfades into every clip anyway).
+    kind, base = time_base(clip)
+    pre = 0.0
+    if kind == "period":
+        pre = base * max(1, math.ceil(min(30.0, 2 * base) / base))
+    elif kind == "duration" and clip.get("wrap", True) is not False:
+        pre = dur
+    first = eval_clip(clip, -pre, motors, ctx)
+    lim.reset([f * tr for f, tr in zip(first, travel)])
+    t = -pre
+    while t < -1e-9:
+        lim.step([v * tr for v, tr in zip(eval_clip(clip, t, motors, ctx), travel)], sim_dt, zeros, travel)
+        t += sim_dt
     times, desired, limited_any = [], [], []
     t = 0.0
     next_sample = 0.0
@@ -650,3 +700,95 @@ def render_clip(clip: dict, motors: list[dict], travel: list[float], vmax, amax,
             next_sample += dt
         t += sim_dt
     return {"t": times, "values": desired, "limited": limited_any}
+
+
+# ------------------------------------------------------------------ fitting a design to the motors
+FIT_MARGIN = 1.10      # keep 10% in hand: with less, a motor that falls behind once (e.g. after a
+                       # crossfade) has too little spare speed to catch up and settles into a lag
+
+
+def time_base(clip: dict) -> tuple[str | None, float]:
+    """What sets the speed of a clip: ("period", s) for patterns, ("duration", s) for timelines."""
+    if clip.get("type") == "pattern" and clip.get("pattern") != "pose":
+        return "period", max(0.1, float((clip.get("params") or {}).get("period", 12)))
+    if clip.get("type") == "timeline":
+        return "duration", max(0.5, float(clip.get("duration", 30)))
+    return None, 0.0
+
+
+def clip_fit(clip: dict, motors: list[dict], to_units, vmax: list[float], amax: list[float],
+             continuous: list[bool], ctx: dict | None = None) -> dict:
+    """How much faster (or slower) than the motors allow does this clip run?
+
+    Samples the design finely and measures, per motor, the top speed and acceleration it asks
+    for (in the motor's own units: to_units(i, value) -> mm, degrees or rev/s). Because a
+    pattern's motion scales with its period, running it `scale` times slower divides speed by
+    `scale` and acceleration by scale²; so the smallest workable period is period * scale.
+      scale > 1  the design asks for more than the motors can do: strokes would be cut short
+      scale < 1  there is headroom; the clip could run 1/scale times faster
+    Continuous-rotation motors: the value is a speed, so only how fast it changes counts.
+    Instant jumps (hold steps, a 0-smoothness step sequence) are left out: no period fixes them.
+    """
+    n = len(motors)
+    kind, base = time_base(clip)
+    dur = max(0.5, float(clip.get("duration", 30)))
+    dt = 0.01 if kind != "period" else min(0.01, base / 120)
+    win = 4000 * dt
+    windows = [(0.0, min(dur, win))]
+    if dur > 2 * win:
+        windows.append((dur - win, dur))         # tempo changes: the end may be faster
+    vreq, areq, jumps = [0.0] * n, [0.0] * n, False
+    for t0, t1 in windows:
+        prev, prev_v = None, [None] * n
+        t = t0
+        while t <= t1 + 1e-9:
+            vals = eval_clip(clip, t, motors, ctx)
+            x = [to_units(i, vals[i]) for i in range(n)]
+            if prev is not None:
+                for i in range(n):
+                    span = abs(to_units(i, 1.0) - to_units(i, 0.0)) or 1.0
+                    dx = x[i] - prev[i]
+                    if abs(dx) > 0.2 * span:          # an instant jump, not motion
+                        jumps = True
+                        prev_v[i] = None
+                        continue
+                    v = dx / dt
+                    vreq[i] = max(vreq[i], abs(v))
+                    if prev_v[i] is not None:
+                        areq[i] = max(areq[i], abs(v - prev_v[i]) / dt)
+                    prev_v[i] = v
+            prev = x
+            t += dt
+    per, why = [], []
+    for i in range(n):
+        if continuous[i]:
+            k = vreq[i] / max(amax[i], 1e-9)      # speed change rate vs acceleration
+            why.append("acceleration")
+        else:
+            kv, ka = vreq[i] / max(vmax[i], 1e-9), math.sqrt(areq[i] / max(amax[i], 1e-9))
+            k = max(kv, ka)
+            why.append("speed" if kv >= ka else "acceleration")
+        per.append(round(k, 4))
+    worst = max(range(n), key=lambda i: per[i]) if n else 0
+    scale = per[worst] if n else 0.0
+    out = {"scale": round(scale, 4), "motor": worst, "per_motor": per, "jumps": jumps,
+           "limit": why[worst] if n else "",
+           "kind": kind, "base": base, "margin": FIT_MARGIN,
+           "v_need": [round(v, 2) for v in vreq], "a_need": [round(a, 2) for a in areq],
+           "min_base": round(base * scale * FIT_MARGIN, 2) if kind else None}
+    # fastest-stroke shape: the ramp that uses top speed and acceleration fully
+    p = clip.get("params") or {}
+    if clip.get("type") == "pattern" and p.get("shape") == "fast" and n and not continuous[worst]:
+        d = 2 * float(p.get("amplitude", 0.3)) * abs(to_units(worst, 1.0) - to_units(worst, 0.0))
+        out["best_ramp"] = round(best_ramp(d, vmax[worst], amax[worst]), 3)
+    return out
+
+
+def best_ramp(stroke: float, vmax: float, amax: float) -> float:
+    """Ramp share for the fastest trapezoid over `stroke` with these limits."""
+    if stroke <= 0 or vmax <= 0 or amax <= 0:
+        return 0.25
+    if stroke <= vmax * vmax / amax:             # never reaches top speed: accelerate, then brake
+        return 0.5
+    t_ramp = vmax / amax
+    return clamp(t_ramp / (stroke / vmax + t_ramp), 0.05, 0.5)

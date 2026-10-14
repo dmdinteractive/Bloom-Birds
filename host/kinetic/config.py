@@ -67,7 +67,11 @@ DEFAULT_CONFIG = {
         "hold_current_pct": 30,
         "invert_dir": False,
         "invert_encoder": False,
-        "spreadcycle": False,       # False = silent stealthChop (needed for StallGuard)
+        # TMC2209 chopper: "stealth" = silent stealthChop always (needed for StallGuard homing),
+        # "spread" = spreadCycle always (most torque, audible), "auto" = stealthChop below
+        # switch_rpm and spreadCycle above it (quiet when slow, strong when fast)
+        "driver_mode": "auto",
+        "switch_rpm": 150,
         # memory: no switches; each motor remembers its position (encoder + saved turn count),
         #         top and bottom are taught once per motor in Motor Setup.
         # limit | stallguard: home against a switch / hard stop at every power-up.
@@ -111,7 +115,8 @@ def default_motors(n: int, layout: str = "line") -> list[dict]:
 
 
 SETUP_KEYS = ("invert_dir", "invert_encoder", "commissioned", "bottom_fs", "node_mac", "commissioned_at",
-              "name", "trim_mm", "travel_mm", "kind", "size", "max_speed", "max_accel", "bidirectional")
+              "name", "trim_mm", "travel_mm", "kind", "size", "max_speed", "max_accel", "bidirectional",
+              "speed_test")
 
 
 def relayout_motors(old: list[dict], n: int, layout: str) -> list[dict]:
@@ -140,7 +145,12 @@ class Config:
         self.data = copy.deepcopy(DEFAULT_CONFIG)
         if self.path.exists():
             try:
-                self.update(json.loads(self.path.read_text()))
+                loaded = json.loads(self.path.read_text())
+                lm = loaded.get("mechanics") or {}
+                if "driver_mode" not in lm and lm.get("spreadcycle"):     # older setting
+                    lm["driver_mode"] = "spread"
+                lm.pop("spreadcycle", None)
+                self.update(loaded)
             except ValueError:
                 self.path.replace(self.path.with_suffix(".corrupt"))   # keep defaults, keep evidence
         if not self.data["motors"]:
@@ -262,6 +272,18 @@ class Config:
     def trim(self, i: int) -> float:
         return float(self.motors[i].get("trim_mm") or 0.0)
 
+    def driver_flags(self) -> int:
+        """Config flag bits for the chopper: bit2 = spreadCycle always; bit3 = automatic switch,
+        with the switch speed (full steps/s) in bits 8-31 (node firmware 4+; older nodes stay
+        in stealthChop)."""
+        mode = self.mech.get("driver_mode", "auto")
+        if mode == "spread":
+            return 4
+        if mode == "auto":
+            fs = int(round(float(self.mech.get("switch_rpm", 150)) * self.mech["full_steps_per_rev"] / 60))
+            return 8 | (max(1, min(fs, 0xFFFFFF)) << 8)
+        return 0
+
     def node_config_args(self, i: int | None = None) -> list[int]:
         """Arguments for the KS_C_CONFIG command (see ks_protocol.h), for motor i
         (per-motor direction settings) or the Mechanics defaults when i is None."""
@@ -272,7 +294,7 @@ class Config:
             spm, vmax, amax, home_v = self.steps_per_mm, m["max_speed_mm_s"], m["max_accel_mm_s2"], m["home_speed_mm_s"]
         inv_dir = self.motor_flag(i, "invert_dir") if i is not None else m["invert_dir"]
         inv_enc = self.motor_flag(i, "invert_encoder") if i is not None else m["invert_encoder"]
-        flags = (1 if inv_dir else 0) | (2 if inv_enc else 0) | (4 if m["spreadcycle"] else 0)
+        flags = (1 if inv_dir else 0) | (2 if inv_enc else 0) | self.driver_flags()
         return [
             int(m["run_current_pct"]),
             int(m["hold_current_pct"]),

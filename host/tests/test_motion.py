@@ -235,3 +235,61 @@ def test_bezier_key_in_track_and_wrap():
     assert M.eval_track(keys, 2.0, 10, False) > 0.6                  # fast early rise
     keys_w = [[0, 0.0, "smooth"], [5, 1.0, "bezier", {"bz": [1.0, 0.0, 1.0, 0.0]}]]
     assert M.eval_track(keys_w, 7.0, 10, True) > 0.9                 # wrap segment uses the last key's curve
+
+
+# ---------------------------------------------------------------- fitting designs to the motors
+def test_trapezoid_stroke_is_continuous_and_reaches_the_ends():
+    for r in (0.05, 0.2, 0.5):
+        xs = [M.trapezoid(u / 1000, r) for u in range(1001)]
+        assert xs[0] == 0 and abs(xs[-1] - 1) < 1e-9
+        assert all(b >= a - 1e-12 for a, b in zip(xs, xs[1:]))          # never goes backwards
+        assert max(abs(b - a) for a, b in zip(xs, xs[1:])) < 1.05 / (1 - r) / 1000 + 1e-9   # top speed
+    assert abs(M.periodic(0.0, 0, "fast") + 1) < 1e-9 and abs(M.periodic(0.5, 0, "fast") - 1) < 1e-9
+
+
+def _breathe(shape, amp=0.25, period=4.0, ramp=0.25):
+    return {"type": "pattern", "pattern": "breathe", "duration": 20,
+            "params": {"center": 0.5, "amplitude": amp, "period": period, "dwell": 0, "shape": shape, "ramp": ramp}}
+
+
+def test_clip_fit_matches_the_physics():
+    """500 mm stroke on 150 mm/s, 300 mm/s² motors: a sine needs period >= pi*500/150 = 10.47 s;
+    the fastest trapezoid needs 2*(500/150 + 150/300) = 7.67 s."""
+    ms = [{"id": 0, "x": 0, "y": 0}]
+    units = lambda i, v: v * 1000  # noqa: E731
+    f = M.clip_fit(_breathe("sine"), ms, units, [150], [300], [False])
+    assert f["kind"] == "period" and f["limit"] == "speed"
+    assert abs(f["base"] * f["scale"] - math.pi * 500 / 150) < 0.1
+    fast = M.clip_fit(_breathe("fast"), ms, units, [150], [300], [False])
+    best = M.clip_fit(_breathe("fast", ramp=fast["best_ramp"]), ms, units, [150], [300], [False])
+    assert abs(best["base"] * best["scale"] - 2 * (500 / 150 + 150 / 300)) < 0.15
+    assert best["min_base"] < f["min_base"]
+    # running it at the suggested period really fits: the limiter keeps up within tolerance
+    c = _breathe("fast", ramp=fast["best_ramp"], period=best["min_base"])
+    r = M.render_clip(c, ms, [1000], 150, 300)
+    assert not any(r["limited"][len(r["limited"]) // 4:])
+
+
+def test_clip_fit_ignores_instant_jumps_and_scales_timelines():
+    ms = [{"id": 0, "x": 0, "y": 0}]
+    units = lambda i, v: v * 1000  # noqa: E731
+    steps = {"type": "pattern", "pattern": "steps", "duration": 8,
+             "params": {"period": 8, "count": 2, "smooth": 0, "levels": [0.2, 0.8]}}
+    assert M.clip_fit(steps, ms, units, [150], [300], [False])["jumps"]
+    tl = {"type": "timeline", "duration": 4, "mode": "shared", "wrap": False,
+          "tracks": {"all": [[0, 0.0, "linear"], [4, 1.0, "linear"]]}}
+    f = M.clip_fit(tl, ms, units, [150], [300], [False])
+    assert f["kind"] == "duration" and abs(f["scale"] - 250 / 150) < 0.02    # 1000 mm in 4 s
+
+
+def test_driver_mode_flags(tmp_path):
+    from kinetic.config import Config
+    cfg = Config(tmp_path / "c.json")
+    assert cfg.mech["driver_mode"] == "auto"
+    fl = cfg.node_config_args(None)[5]
+    assert fl & 8 and not fl & 4 and (fl >> 8) == round(150 * 200 / 60)
+    cfg.mech["driver_mode"] = "spread"
+    assert cfg.node_config_args(None)[5] & 0xFF == 4
+    import json
+    (tmp_path / "old.json").write_text(json.dumps({"mechanics": {"spreadcycle": True}}))
+    assert Config(tmp_path / "old.json").mech["driver_mode"] == "spread"

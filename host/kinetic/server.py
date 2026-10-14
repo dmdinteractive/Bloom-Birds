@@ -122,8 +122,22 @@ def create_app(engine: Engine) -> web.Application:
             ctx = engine.eval_ctx()
             if isinstance(body.get("clips"), list):     # the editor's unsaved clip library
                 ctx["clips"] = {c["id"]: c for c in body["clips"] if isinstance(c, dict) and "id" in c}
-            data = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: M.render_clip(body["clip"], cfg.motors, travel, vmax, amax, ctx=ctx))
+            clip = body["clip"]
+            kind, base = M.time_base(clip)
+            # sample fast motion finely enough to draw it (a 0.5 s flap needs more than 10/s)
+            sps = min(100.0, max(10.0, 30.0 / base)) if kind == "period" else 10.0
+            cont = [cfg.is_continuous(i) for i in range(n)]
+
+            def units(i, v):
+                return cfg.speed_from_norm(i, v) if cont[i] else v * travel[i]
+
+            def work():
+                d = M.render_clip(clip, cfg.motors, travel, vmax, amax, ctx=ctx, samples_per_s=sps,
+                                  max_samples=2400)
+                d["fit"] = M.clip_fit(clip, cfg.motors, units, [cfg.vmax(i) for i in range(n)],
+                                      [cfg.amax(i) for i in range(n)], cont, ctx)
+                return d
+            data = await asyncio.get_running_loop().run_in_executor(None, work)
         except Exception as e:  # noqa: BLE001
             return web.json_response({"error": str(e)}, status=400)
         return web.json_response(data)
@@ -271,10 +285,17 @@ def handle_command(engine: Engine, msg: dict):
         engine.remove_unused()
     # ---- Motor Setup wizard
     elif c == "wiz_start":
-        engine.wiz_start(msg["mac"], int(msg["motor"]), bool(msg.get("recover")))
+        engine.wiz_start(msg["mac"], int(msg["motor"]), bool(msg.get("recover")), bool(msg.get("speed_only")))
+    elif c == "wiz_speed":
+        engine.wiz_speed_test()
+    elif c == "wiz_speed_stop":
+        engine.wiz_speed_stop()
+    elif c == "wiz_speed_save":
+        engine.wiz_speed_save(bool(msg.get("use", True)))
     elif c == "wiz_jog":
         engine.wiz_jog(float(msg["mm"]))
     elif c == "wiz_stop":
+        engine.wiz_speed_stop()
         if engine.wizard:
             engine.send_cmd(P.C_STOP, engine.wizard["motor"])
     elif c == "wiz_dir_test":

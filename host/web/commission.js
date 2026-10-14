@@ -76,6 +76,7 @@ function stepLabel(k, w) {
   if (k === "top") return (w?.recover ? "Find " : "Teach ") + (w?.home || "top");
   if (k === "bottom") return "Teach " + (w?.far || "bottom");
   if (k === "test") return "Test";
+  if (k === "speed") return "Speed test";
   return "Save";
 }
 function stepsFor(w) {
@@ -160,6 +161,28 @@ function mechHtml(w) {
     <div class="step-actions sticky"><button class="big go" data-act="mech_ok" ${w.busy ? "disabled" : ""}>Continue</button></div>`;
 }
 
+// speed test: rising speeds, then rising accelerations, until the encoder sees missed steps
+const fmtLim = (v, dflt) => { const x = v ?? dflt; return x == null ? "default" : Number(x) >= 100 ? Math.round(x) : Number(x).toFixed(2); };
+function speedHtml(w) {
+  const r = w.speed, u = w.unit || "mm", busy = w.busy;
+  const intro = `<div class="step-text">Finds how fast ${esc(mname(w.motor))} can move <b>with its real load attached</b>.
+    It runs back and forth over the middle of its travel${w.kind === "continuous" ? " (10 turns at a time)" : ""}, faster each time,
+    until the encoder shows the motor slipped. Then it tries harder starts and stops. It suggests limits about 30–40% below what ran clean.
+    <br><b>Keep people and hands clear: it will move fast.</b> A slipped run makes a buzzing or clunk; that is expected and harmless.</div>`;
+  const rows = r?.levels?.length ? `<table class="summary speed-table"><tr><th>Run</th><th>Speed</th><th>Accel</th><th>Result</th></tr>${r.levels.map((l, k) =>
+    `<tr class="${l.ok ? "" : "bad"}"><td>${k + 1} ${l.phase === "accel" ? "· start/stop" : ""}</td><td>${fmtLim(l.v)} ${esc(u)}/s</td><td>${fmtLim(l.a)} ${esc(u)}/s²</td><td>${l.ok ? "clean" : "slipped"}</td></tr>`).join("")}</table>` : "";
+  let actions;
+  if (busy) actions = `<button class="big stop" data-act="speed_stop"><span class="sq"></span>Stop the test</button>`;
+  else if (r && r.v_save) actions = `<button class="big go" data-act="speed_use">Use ${fmtLim(r.v_save)} ${esc(u)}/s and ${fmtLim(r.a_save)} ${esc(u)}/s²</button>
+      <button class="big" data-act="speed_keep">Keep current (${fmtLim(r.v_now)} / ${fmtLim(r.a_now)})</button>
+      <button class="mid" data-act="speed_run">Run again</button>`;
+  else actions = `<button class="big primary" data-act="speed_run">Run speed test</button>
+      ${w.speed_only ? "" : `<button class="mid" data-act="skip_speed">Skip</button>`}`;
+  const result = r && r.v_save && !busy ? `<div class="msg">Ran clean up to <b>${fmtLim(r.v_ok)} ${esc(u)}/s</b> (≈${Math.round(r.rpm_save / 0.7)} RPM) and
+    <b>${fmtLim(r.a_ok)} ${esc(u)}/s²</b>${r.stopped ? `; stopped because: ${esc(r.stopped)}` : ""}. Current limits: ${fmtLim(r.v_now)} ${esc(u)}/s, ${fmtLim(r.a_now)} ${esc(u)}/s².</div>` : "";
+  return intro + result + msgBox(w) + rows + `<div class="spacer"></div><div class="step-actions sticky">${actions}</div>`;
+}
+
 function stepHtml(w) {
   const n = w?.node || {};
   const moving = n.moving || w?.busy;
@@ -212,6 +235,8 @@ function stepHtml(w) {
         ${msgBox(w)}
         <div class="step-actions"><button class="big primary" data-act="test" ${moving ? "disabled" : ""}>${w.kind === "continuous" ? "Run spin test" : "Run test moves"}</button>
           <button class="mid" data-act="skip_test" ${moving ? "disabled" : ""}>Skip</button></div>`;
+    case "speed":
+      return title("Speed test") + speedHtml(w);
     case "finish": {
       const m = C.config.motors[w.motor] || {}, kinfo = (C.kinds || {})[w.kind] || {};
       const rows = w.recover
@@ -221,7 +246,8 @@ function stepHtml(w) {
            ["Motor direction", m.invert_dir ? "reversed" : "normal"], ["Encoder direction", m.invert_encoder ? "reversed" : "normal"],
            ...(w.kind === "continuous" ? [["Directions", w.bidirectional ? "both" : "forward only"]]
              : [[`Travel (${w.home} to ${w.far})`, `${mm(w.bottom_mm, 0)} ${u}`]]),
-           ["Test", w.test_done ? "done" : "skipped"]];
+           ["Test", w.test_done ? "done" : "skipped"],
+           ["Speed limit", `${fmtLim(C.tick?.vmax?.[w.motor])} ${u}/s, ${fmtLim(C.tick?.amax?.[w.motor])} ${u}/s²${w.speed?.v_save ? " (speed test)" : ""}`]];
       return title("Save") + `
         <div class="step-text">Check the summary and save. ${w.kind === "continuous" ? "The show will drive this motor's speed." :
           "The motor will remember its position from now on, including across power cuts, and the show can use it."}</div>
@@ -259,6 +285,7 @@ function chooseHtml() {
   const lost = sel && C.selMotor === sel.id && nodeState(sel)[0] === "bad";
   const ends = (C.selMotor !== null && C.tick?.ends?.[C.selMotor]) || ["top", "bottom"];
   const canRecover = C.tick?.kinds?.[C.selMotor] !== "continuous" && !isNew && (sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost);
+  const canSpeed = !isNew && sel && C.selMotor !== null && sel.id === C.selMotor && comm[C.selMotor] && nodeState(sel)[0] === "on";
   return `
     <div class="step-title">Choose the motor to set up</div>
     <div class="sec-row"><span class="section-h">1. Board</span>
@@ -281,14 +308,15 @@ function chooseHtml() {
     <div class="step-actions sticky">
       <button class="big go" data-act="start" ${sel && C.selMotor !== null ? "" : "disabled"}>${isNew ? `Add M${n + 1} and start setup` : "Start full setup"}</button>
       ${canRecover ? `<button class="big primary" data-act="recover">Find ${esc(ends[0])} only</button>` : ""}
-      <span class="hint">${canRecover ? `Find ${esc(ends[0])} only: for a motor that lost its position. Keeps its ${esc(ends[1])} limit.` : ""}</span>
+      ${canSpeed ? `<button class="big" data-act="speed_only">Speed test only</button>` : ""}
+      <span class="hint">${canRecover ? `Find ${esc(ends[0])} only: for a motor that lost its position. Keeps its ${esc(ends[1])} limit. ` : ""}${canSpeed ? "Speed test only: measure how fast this motor can safely go, keeping everything else." : ""}</span>
     </div>`;
 }
 
 function doneHtml() {
   const f = C.finished;
-  return `<div class="step-title">${esc(mname(f.motor))} is set up</div>
-    <div class="step-text">${f.recover ? "The top was re-found. The motor knows its position again." :
+  return `<div class="step-title">${esc(mname(f.motor))} ${f.speedOnly ? "speed test done" : "is set up"}</div>
+    <div class="step-text">${f.speedOnly ? "Its speed and acceleration limits are saved. Motion designs now show the fastest cycle it can do." : f.recover ? "The top was re-found. The motor knows its position again." :
       `Travel ${mm(C.tick?.travel?.[f.motor], 0)} mm. The motor remembers its position from now on.`}
       The show is stopped. Press <b>ENABLE</b> on the panel or editor when you are ready to run it.</div>
     <div class="step-actions"><button class="big primary" data-act="another">Set up another motor</button>
@@ -329,6 +357,16 @@ $("#stepBox").addEventListener("click", async (ev) => {
     C.finished = null;
     send("wiz_start", { mac: C.selMac, motor: C.selMotor, recover: a === "recover" });
   }
+  else if (a === "speed_only") {
+    const armed = C.tick?.armed;
+    if (armed && !(await modal("The speed test stops the show. Continue?", [{ label: "Cancel", value: false }, { label: "Stop show and continue", value: true, cls: "primary" }]))) return;
+    C.finished = null;
+    send("wiz_start", { mac: C.selMac, motor: C.selMotor, speed_only: true });
+  }
+  else if (a === "speed_run") send("wiz_speed");
+  else if (a === "speed_stop") send("wiz_speed_stop");
+  else if (a === "speed_use") send("wiz_speed_save", { use: true });
+  else if (a === "speed_keep") send("wiz_speed_save", { use: false });
   else if (a === "stop") send("wiz_stop");
   else if (a === "dir_test") send("wiz_dir_test");
   else if (a === "lowered") send("wiz_dir_answer", { correct: true });
@@ -338,8 +376,9 @@ $("#stepBox").addEventListener("click", async (ev) => {
   else if (a === "top") send("wiz_top");
   else if (a === "bottom") send("wiz_bottom");
   else if (a === "test") send("wiz_test");
-  else if (a === "skip_test") send("wiz_goto", { step: "finish" });
-  else if (a === "finish") { C.finished = { motor: C.tick.wizard.motor, recover: C.tick.wizard.recover }; send("wiz_finish"); }
+  else if (a === "skip_test") send("wiz_goto", { step: C.tick.wizard.steps.includes("speed") ? "speed" : "finish" });
+  else if (a === "skip_speed") send("wiz_goto", { step: "finish" });
+  else if (a === "finish") { C.finished = { motor: C.tick.wizard.motor, recover: C.tick.wizard.recover, speedOnly: C.tick.wizard.speed_only }; send("wiz_finish"); }
   else if (a === "another") { C.finished = null; C.selMac = null; C.selMotor = null; C.wantNew = true; C.key = ""; render(); }
   else if (a === "exit") location.href = FROM;
 });

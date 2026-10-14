@@ -59,7 +59,8 @@ enum : uint8_t {
   KS_CFG_MICROSTEPS = 2,    // 1..256
   KS_CFG_MAX_SPEED = 3,     // microsteps/s (node-side safety cap)
   KS_CFG_MAX_ACCEL = 4,     // microsteps/s^2 (node-side tracking accel, set ~2x host limit)
-  KS_CFG_FLAGS = 5,         // bit0 invert motor dir, bit1 invert encoder, bit2 spreadCycle instead of stealthChop
+  KS_CFG_FLAGS = 5,         // bit0 invert motor dir, bit1 invert encoder, bit2 spreadCycle instead of stealthChop,
+                            // bit3 auto-switch to spreadCycle above (flags >> 8) full steps/s (node fw 4+)
   KS_CFG_HOME_MODE = 6,     // 0 none (use SET_ZERO), 1 limit switch on AUX2, 2 StallGuard,
                             // 3 memory: no switch; position remembered across power cycles (encoder + saved turn count)
   KS_CFG_HOME_SPEED = 7,    // microsteps/s (always winds IN, toward negative)

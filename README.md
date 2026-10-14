@@ -149,7 +149,26 @@ Setup…*), or at `http://<pi>:8080/setup`.
 | 4. Teach top | Jog up (50/10/1 mm buttons) to the highest safe spot, then *Set as top*. This is 0 mm. |
 | 5. Teach bottom | Jog down to the lowest safe spot, then *Set as bottom*. Limits switch on immediately. |
 | 6. Test | A slow move to the middle, the bottom and back to the top, inside the limits. |
-| 7. Save | The motor's travel becomes the distance you taught. Shows scale to it automatically. |
+| 7. Speed test (optional) | Measures how fast this motor can move **with its real load**. See below. |
+| 8. Save | The motor's travel becomes the distance you taught. Shows scale to it automatically. |
+
+**Speed test.** The default limits (150 mm/s and 300 mm/s² on a spool, about 72 RPM on a 40 mm
+spool) are deliberately cautious. The speed test finds what each motor can really do:
+- It runs back and forth over the middle 60% of the taught travel (continuous motors: 10 turns
+  at a time), starting at half the current limit and going 30% faster each run.
+- After every run it compares where the driver stepped to with where the encoder says the shaft
+  went. A gap of more than about 1/20 of a turn means the motor slipped, and the test stops
+  there. If a run slips while it was also ramping harder than any clean run, it retries that
+  speed once with the gentlest ramp the stroke allows, so a steep ramp isn't mistaken for a
+  speed limit.
+- Then it raises the acceleration at 80% of the top speed found, until that slips too.
+- It suggests **70% of the clean top speed** and **60% of the clean acceleration**, and shows
+  every run in a table. *Use* saves them for that motor; *Keep current* doesn't.
+- After a slip it re-syncs the motor's position to the encoder, so the taught limits stay true.
+  The test never runs above 1200 RPM or outside the taught limits.
+- **Run it with the real load attached**, and again after changing the load, run current or
+  supply voltage. A slipped run makes a buzz or clunk; that's expected and harmless.
+- For a motor that's already set up, choose it in Motor Setup and press **Speed test only**.
 
 **Adding and removing motors.** A new install starts with one motor.
 - **Set how many positions** with the **Motors − N +** control (editor Axes tab, panel System view).
@@ -286,8 +305,32 @@ plays the playlist in a loop (turn this off under Setup → Startup).
 | Organic drift | Smooth, never-repeating movement, with a neighbor-coherence slider |
 | Static pose | A fixed height for each motor |
 
-Every pattern also has **center height**, **amplitude**, **period**, and **dwell**. Dwell
+Every pattern also has **center height**, **stroke**, **period**, and **dwell**. Dwell
 adds a pause at the top and bottom of each cycle, which reads as "breathing."
+
+**Designing by stroke.** **Stroke** is the size of the movement as a percentage of each motor's
+taught length (100% = home to far end). The settings show it in real units too (e.g.
+*Stroke 50% = 500 mm*). Under the settings, **Fastest cycle for this stroke** shows the
+shortest period the motors can manage at their speed and acceleration limits:
+- The editor won't keep a period that is too short. If you type one, it is raised to the
+  fastest workable period and a message says so, so every stroke completes in full instead of
+  being cut short.
+- It names which motor and which limit (speed or acceleration) sets the pace, and how much of
+  the motors' limits the current period uses.
+- It keeps 10% in hand. With less, a motor that falls behind once (for example during a
+  crossfade) has no spare speed to catch up.
+- Raising the limits (Speed test in Motor Setup) makes faster cycles possible.
+- Timeline clips get a **Stretch to fit** button when a curve asks too much; it slows the
+  whole curve evenly (keyframes, stagger and tempo).
+- Speeding the show up from the touch panel (above 100%) can still cut strokes short; the
+  editor warns when that would happen.
+
+**Stroke shape** (breathe, wave, ripple, spin, alternate): *Smooth (sine)* or *Fastest stroke*.
+The fastest stroke accelerates at a constant rate, cruises at top speed, then brakes, which covers
+a stroke sooner than a sine with the same limits. Example: a 500 mm stroke at 150 mm/s and
+300 mm/s² needs about 10.5 s per cycle as a sine, but 7.7 s as the fastest stroke. **Ramp** sets
+how much of each stroke is speeding up and slowing down; the editor offers the ramp that uses top
+speed and acceleration fully.
 
 More shapes, for any kind of kinetic piece:
 
@@ -403,11 +446,19 @@ Created on first run and edited from the Setup tab.
 
 - **Mechanics:**
   - Motion: spool diameter, travel, max speed and acceleration, microsteps.
-  - Driver: run and hold current (% of the TMC2209 max), USB-PD voltage, stealthChop or
-    spreadCycle.
+  - Driver: run and hold current (% of the TMC2209 max), USB-PD voltage, and **Driver
+    mode**:
+    - *Auto* (default): quiet stealthChop at low speed, switching to spreadCycle above the
+      **switch speed** (motor RPM, default 150) for more torque.
+    - *Always silent* (stealthChop): quietest, but less torque at speed.
+    - *Always strong* (spreadCycle): audible.
+
+    StallGuard homing needs stealthChop. Auto switching needs node firmware 4; older nodes
+    stay in stealthChop.
   - Homing: mode (position memory, which is the default with no switches; limit switch;
     StallGuard; or manual), speed, back-off, timeout.
-- **Per motor:** name, layout X/Y, trim (fine height offset), and a travel override.
+- **Per motor:** name, layout X/Y, trim (fine height offset), a travel override, and max
+  speed / acceleration (set by the speed test, or by hand in the Axis Layout table).
   Motor Setup also stores, per motor, the taught bottom (in full motor steps, so re-measuring
   the spool diameter never moves it), its own motor and encoder direction, and which board
   was set up there.
@@ -422,6 +473,13 @@ Created on first run and edited from the Setup tab.
 - **Protocol version 3.** Speed mode for continuous rotation changed the radio messages (version 2 added position memory). Re-flash **both** the
   bridge and every node. The controller names any node still running old firmware in the
   event log.
+- **Node firmware 4** adds automatic stealthChop/spreadCycle switching (TMC2209 `TPWMTHRS`
+  register; see the [TMC2209 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/TMC2209_datasheet_rev1.08.pdf)).
+  The radio protocol is unchanged, so only the **nodes** need re-flashing, not the bridge.
+- **Speed test:** checked against simulated motors that slip above a set speed and
+  acceleration. On real hardware, how quickly the encoder can follow a fast shaft hasn't been
+  measured. If it can't keep up, the test reads that as a slip and stops early, which is the
+  safe direction.
 - **The power-loss save is the part most likely to need bench work.** It depends on how
   long the PD Stepper keeps running after the supply drops. That's a few tens of
   milliseconds at best, and it depends on the board's and the PoE splitter's capacitors,
@@ -433,13 +491,15 @@ Created on first run and edited from the Setup tab.
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 78 automated tests. They include:
+- **Pi software** is covered by 83 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;
   - a single board rebooting mid-show;
   - limit enforcement;
   - a complete Motor Setup run on a simulated board wired backwards with its magnet flipped.
+  - the speed test finding a simulated motor's slip limits and keeping its position;
+  - the fastest-cycle calculation against hand-worked physics;
   - the OSC, Art-Net and MIDI decoders, trigger mapping rules, and "play a clip then
     resume" returning to the exact playlist position.
 - **External triggers:** OSC and Art-Net were tested with real network packets. The MIDI

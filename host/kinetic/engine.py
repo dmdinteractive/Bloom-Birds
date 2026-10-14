@@ -846,17 +846,19 @@ class Engine:
                     "rotary": [1, 2, 3, 4, 5, 10, 14, 19, 27, 50, 100], "continuous": [1, 2, 3, 4, 5, 10, 14, 19, 27, 50, 100]}
 
     def _wiz_steps(self, w: dict) -> list[str]:
+        if w.get("speed_only"):
+            return ["speed", "finish"]
         if w["recover"]:
             return ["top", "finish"]
         if self.cfg.is_continuous(w["motor"]):
-            return ["mechanism", "direction", "encoder", "test", "finish"]
-        return ["mechanism", "direction", "encoder", "top", "bottom", "test", "finish"]
+            return ["mechanism", "direction", "encoder", "test", "speed", "finish"]
+        return ["mechanism", "direction", "encoder", "top", "bottom", "test", "speed", "finish"]
 
     def _wiz_next(self, after: str) -> str:
         steps = self._wiz_steps(self.wizard)
         return steps[min(steps.index(after) + 1, len(steps) - 1)] if after in steps else steps[-1]
 
-    def wiz_start(self, mac: str, motor: int, recover: bool = False):
+    def wiz_start(self, mac: str, motor: int, recover: bool = False, speed_only: bool = False):
         added = False
         if motor == self.cfg.motor_count:       # "New motor" chosen in the wizard
             motor = self.add_motor()
@@ -878,12 +880,15 @@ class Engine:
             self.assign(mac, motor)
         m = self.cfg.motors[motor]
         recover = bool(recover and m.get("commissioned") and m.get("bottom_fs") and not self.cfg.is_continuous(motor))
-        self.wizard = {"mac": mac, "motor": motor, "recover": recover,
-                       "step": "top" if recover else "mechanism", "busy": False, "msg": "", "error": "",
+        speed_only = bool(speed_only and m.get("commissioned") and not recover and not added)
+        self.wizard = {"mac": mac, "motor": motor, "recover": recover, "speed_only": speed_only,
+                       "step": "speed" if speed_only else "top" if recover else "mechanism",
+                       "busy": False, "msg": "", "error": "", "speed": None,
                        "dir_tested": False, "encoder_ok": False, "top_set": False, "bottom_mm": None,
                        "test_done": False, "was_commissioned": bool(m.get("commissioned")), "added": added}
         self._wiz_later(self._wiz_prepare())
-        self.event(("Motor Setup (find home)" if recover else "Motor Setup") + f" started for M{motor + 1}")
+        self.event(("Motor Setup (find home)" if recover else "Speed test" if speed_only else "Motor Setup")
+                   + f" started for M{motor + 1}")
 
     async def _wiz_prepare(self):
         w = self.wizard
@@ -891,7 +896,7 @@ class Engine:
         await self._wait_for(lambda: (n := self._wiz_node()) and n["status"].id == i, 5.0)
         self.push_config(i)
         await asyncio.sleep(0.3)
-        if not w["recover"]:
+        if not w["recover"] and not w.get("speed_only"):
             self.send_cmd(P.C_SET_LIMITS, i, args=[0, 0, 0])   # free to move while teaching
         self.enable(i, True)
 
@@ -1108,7 +1113,7 @@ class Engine:
                 self._wiz_set(msg=f"Spin test: forward at {spd:.2f} {unit} for 3 s, then back.")
                 await self._wiz_move_and_wait(spd * 3, free=True, speed=spd, timeout=20)
                 await self._wiz_move_and_wait(-spd * 3, free=True, speed=spd, timeout=20)
-                self._wiz_set(test_done=True, step="finish", msg="Spin test complete.")
+                self._wiz_set(test_done=True, step=self._wiz_next("test"), msg="Spin test complete.")
             self._wiz_later(spin())
             return
         if not w.get("bottom_fs"):
@@ -1126,8 +1131,209 @@ class Engine:
                 self._wiz_set(msg=f"Test move: going to the {label} ({goal:.0f} {unit})")
                 await self._wiz_move_and_wait(goal - here, free=False, speed=spd,
                                               timeout=abs(goal - here) / spd + 15)
-            self._wiz_set(test_done=True, step="finish", msg="Test complete. Check it stopped at the right places.")
+            self._wiz_set(test_done=True, step=self._wiz_next("test"), msg="Test complete. Check it stopped at the right places.")
         self._wiz_later(go())
+
+    # ---------------------------------------------------------------- speed test
+    # Runs the motor (with its real load attached) back and forth over most of its travel at
+    # rising speeds, then rising accelerations, until the encoder shows it missed steps. The
+    # AS5600 sees where the shaft really is, so a stall shows up as a gap between where the
+    # driver stepped to and where the encoder says the shaft went. Suggested limits keep a
+    # margin below the last speed and acceleration that ran clean.
+    SPEED_MARGIN = 0.7
+    ACCEL_MARGIN = 0.6
+    TEST_RPM_CAP = 1200          # never test above this motor speed
+    TEST_STEP_RATE_CAP = 100000  # microsteps/s, well inside the ESP32-S3 step generator
+
+    def wiz_speed_test(self):
+        w = self.wizard
+        if not w or w["busy"]:
+            return
+        i, mac = w["motor"], w["mac"]
+        cfg = self.cfg
+        cont = cfg.is_continuous(i)
+        spu = cfg.spu(i)
+        upr = cfg.unit_per_rev(i)                       # units per motor revolution
+        unit = cfg.unit(i)
+        spr = cfg.mech["full_steps_per_rev"] * cfg.mech["microsteps"]
+        v_cap = min(self.TEST_RPM_CAP / 60 * upr, self.TEST_STEP_RATE_CAP / spu)
+        a_cap = 80 * upr                                # 80 motor rev/s²
+        if cont:
+            stroke, start = 10 * upr, None
+        else:
+            if not w.get("bottom_mm") and not cfg.motors[i].get("bottom_fs"):
+                self._wiz_set(error="Teach both ends before the speed test.")
+                return
+            span = w.get("bottom_mm") or cfg.travel(i)
+            stroke, start = 0.6 * span, 0.2 * span
+        v_now, a_now = cfg.vmax(i), cfg.amax(i)
+        base_args = cfg.node_config_args(i)
+        res = {"levels": [], "v_ok": None, "a_ok": None, "stopped": "", "unit": unit,
+               "v_now": round(v_now, 3), "a_now": round(a_now, 3), "running": True}
+        w["speed"] = res
+
+        def node():
+            return self.node_by_id(i)
+
+        def cfg_accel(a):                               # jog accel comes from the node config
+            args = list(base_args)
+            args[4] = int(a * spu)
+            self.send_cmd(P.C_CONFIG, i, args=args)
+
+        async def settle(timeout):
+            await asyncio.sleep(0.4)
+            ok = await self._wait_for(lambda: (n := node()) and not n["status"].has("moving"), timeout)
+            await asyncio.sleep(0.5)                   # a fresh status after stopping
+            return ok
+
+        def slipped() -> float:
+            n = node()
+            if not n or n["status"].enc is None:
+                raise RuntimeError("The motor stopped reporting its encoder during the test.")
+            return abs(n["status"].enc - n["status"].pos) / spr     # in motor revolutions
+
+        async def resync():
+            # take the encoder's word for where the shaft is, so the soft limits stay true
+            n = node()
+            if n and n["status"].enc is not None:
+                self.send_cmd(P.C_SET_ZERO, i, args=[int(n["status"].enc)])
+                await asyncio.sleep(0.6)
+
+        async def go_to(pos_units, v, a):
+            n = node()
+            here = n["status"].pos / spu
+            cfg_accel(a)
+            await asyncio.sleep(0.3)
+            self.jog(i, pos_units - here, free=False, speed=v)
+            return await settle(abs(pos_units - here) / max(v, 1e-6) + v / a + 10)
+
+        async def trial(v, a) -> bool:
+            """One there-and-back run. True = clean."""
+            cfg_accel(a)
+            await asyncio.sleep(0.3)
+            moves = [stroke, -stroke] if (not cont or cfg.bidirectional(i)) else [stroke, stroke]
+            for d in moves:
+                self.jog(i, d, free=cont, speed=v)
+                if not await settle(abs(d) / v + v / a + 8):
+                    self.send_cmd(P.C_STOP, i)
+                    return False
+                if slipped() > 0.05:                   # ~18° behind: it missed steps
+                    return False
+            return True
+
+        async def run():
+            ok_v = ok_a = None
+            stopped = False
+            try:
+                if not cont:
+                    self._wiz_set(msg="Moving to the start of the test stroke")
+                    await go_to(start, v_now * 0.5, a_now)
+                    if slipped() > 0.05:
+                        await resync()
+                # 1. top speed. Ramp so the move reaches speed within the first quarter of the
+                # stroke; if that fails, try the same speed once with the gentlest ramp the stroke
+                # allows, so a too-steep ramp isn't mistaken for a too-high speed.
+                async def recover():
+                    if not cont:
+                        if slipped() > 0.05:
+                            await resync()
+                        await go_to(start, v_now * 0.5, a_now)
+
+                gentle = False
+                a_clean = a_now
+                v = v_now * 0.5
+                while v <= v_cap * 1.0001:
+                    a = min(a_cap, max(a_now, v * v / ((0.9 if gentle else 0.5) * stroke)))
+                    self._wiz_set(msg=f"Speed {v:.0f} {unit}/s ({v / upr * 60:.0f} RPM)")
+                    clean = await trial(v, a)
+                    res["levels"].append({"phase": "speed", "v": round(v, 2), "a": round(a, 1), "ok": clean})
+                    self._wiz_set(speed=res)
+                    if not clean and not gentle and a > a_clean * 1.01:
+                        await recover()
+                        gentle = True
+                        a = min(a_cap, max(a_now, v * v / (0.9 * stroke)))
+                        self._wiz_set(msg=f"Speed {v:.0f} {unit}/s again with a gentler ramp")
+                        clean = await trial(v, a)
+                        res["levels"].append({"phase": "speed", "v": round(v, 2), "a": round(a, 1), "ok": clean})
+                        self._wiz_set(speed=res)
+                    if not clean:
+                        res["stopped"] = ("missed steps; reaching a higher speed in this stroke needs more "
+                                          "acceleration than the motor has" if a > a_clean * 1.01 else "missed steps")
+                        break
+                    ok_v = v
+                    a_clean = max(a_clean, a)
+                    if v >= v_cap * 0.9999:
+                        res["stopped"] = "reached the test limit"
+                        break
+                    v = min(v * 1.3, v_cap)
+                if not ok_v:
+                    raise RuntimeError("The motor missed steps even at half its current speed limit. "
+                                       "Check the load, run current (Setup) and supply voltage.")
+                await recover()
+                # 2. acceleration, at 80% of the top speed found
+                v = ok_v * 0.8
+                a = a_clean
+                ok_a = a_clean
+                while a < a_cap:
+                    a = min(a * 1.5, a_cap)
+                    self._wiz_set(msg=f"Acceleration {a:.0f} {unit}/s² at {v:.0f} {unit}/s")
+                    clean = await trial(v, a)
+                    res["levels"].append({"phase": "accel", "v": round(v, 2), "a": round(a, 1), "ok": clean})
+                    self._wiz_set(speed=res)
+                    if not clean:
+                        break
+                    ok_a = a
+                res["v_ok"], res["a_ok"] = round(ok_v, 2), round(ok_a, 1)
+                res["v_save"] = round(ok_v * self.SPEED_MARGIN, 1)
+                res["a_save"] = round(ok_a * self.ACCEL_MARGIN, 1)
+                res["rpm_save"] = round(res["v_save"] / upr * 60)
+                self._wiz_set(msg=f"Clean up to {ok_v:.0f} {unit}/s and {ok_a:.0f} {unit}/s². "
+                                  f"Suggested limits keep a margin below that.")
+            except asyncio.CancelledError:
+                stopped = True                         # the Stop button: don't move again
+                res["stopped"] = "stopped by you"
+                raise
+            finally:
+                res["running"] = False
+                try:
+                    if stopped:
+                        await self._wait_for(lambda: (n := node()) and not n["status"].has("moving"), 10)
+                        await asyncio.sleep(0.5)
+                    if not cont and slipped() > 0.05:
+                        await resync()
+                    self.send_cmd(P.C_CONFIG, i, args=base_args)    # back to the saved limits
+                    await asyncio.sleep(0.3)
+                    if not cont and not stopped:
+                        await go_to(start + stroke / 2, v_now * 0.5, a_now)   # park mid-travel
+                        self.send_cmd(P.C_CONFIG, i, args=base_args)
+                except Exception:  # noqa: BLE001 - never leave the test settings on the node
+                    self.send_cmd(P.C_CONFIG, i, args=base_args)
+                if self.wizard and self.wizard.get("mac") == mac:
+                    self._wiz_set(speed=res)
+        self._wiz_later(run())
+
+    def wiz_speed_stop(self):
+        w = self.wizard
+        if w and w["step"] == "speed" and self._wiz_task and not self._wiz_task.done():
+            self.send_cmd(P.C_STOP, w["motor"])
+            self._wiz_task.cancel()
+            self.event(f"Speed test stopped for M{w['motor'] + 1}")
+
+    def wiz_speed_save(self, use: bool = True):
+        """Keep the suggested limits (use=True) or the current ones, then go on."""
+        w = self.wizard
+        if not w:
+            return
+        i, r = w["motor"], w.get("speed") or {}
+        m = self.cfg.motors[i]
+        if use and r.get("v_save"):
+            m["max_speed"], m["max_accel"] = r["v_save"], r["a_save"]
+            m["speed_test"] = {"v_ok": r["v_ok"], "a_ok": r["a_ok"], "at": time.strftime("%Y-%m-%d %H:%M")}
+            self.cfg.save()
+            self.push_config(i)
+            self.event(f"M{i + 1} limits set from the speed test: {r['v_save']} {r['unit']}/s, "
+                       f"{r['a_save']} {r['unit']}/s²")
+        self._wiz_set(step="finish", msg="")
 
     def wiz_goto(self, step: str):
         """Go back to an earlier step (e.g. re-teach the far end after the test)."""
@@ -1151,6 +1357,13 @@ class Engine:
         i = w["motor"]
         m = self.cfg.motors[i]
         cont = self.cfg.is_continuous(i)
+        if w.get("speed_only"):
+            self.cfg.save()
+            self.push_config(i)
+            self.push_limits(i)
+            self.event(f"Speed test finished for M{i + 1}")
+            self.wizard = None
+            return
         if not w["recover"] and not cont:
             if not (w["top_set"] and w.get("bottom_fs")):
                 self._wiz_set(error="Teach both ends first.")
@@ -1272,6 +1485,8 @@ class Engine:
             "setup_macs": [m.get("node_mac") for m in self.cfg.motors],
             "kinds": [self.cfg.kind(i) for i in range(self.cfg.motor_count)],
             "units": [self.cfg.unit(i) for i in range(self.cfg.motor_count)],
+            "vmax": [round(self.cfg.vmax(i), 3) for i in range(self.cfg.motor_count)],
+            "amax": [round(self.cfg.amax(i), 3) for i in range(self.cfg.motor_count)],
             "ends": [[self.cfg.kind_info(i)["home"], self.cfg.kind_info(i)["far"]] for i in range(self.cfg.motor_count)],
             "home_mode": self.cfg.mech["home_mode"],
             "wizard": self.wizard_snapshot(),

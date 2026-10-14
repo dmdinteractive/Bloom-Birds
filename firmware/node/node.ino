@@ -42,7 +42,7 @@
 #include <FastAccelStepper.h>
 #include "ks_protocol.h"
 
-#define FW_VERSION 3
+#define FW_VERSION 4   // 4: automatic stealthChop/spreadCycle switching
 #define ESPNOW_CHANNEL 1   // must match the bridge
 #define FULL_STEPS_PER_REV 200  // 1.8 degree motor
 
@@ -213,7 +213,19 @@ void applyConfig() {
   driver.setMicrostepsPerStep(cfg[KS_CFG_MICROSTEPS]);
   driver.setRunCurrent(constrain(cfg[KS_CFG_RUN_CURRENT], 0, 100));
   driver.setHoldCurrent(constrain(cfg[KS_CFG_HOLD_CURRENT], 0, 100));
-  if (cfg[KS_CFG_FLAGS] & 0x04) driver.disableStealthChop(); else driver.enableStealthChop();
+  // Chopper: bit2 = spreadCycle always. Otherwise stealthChop, and with bit3 the driver switches
+  // to spreadCycle by itself above (flags >> 8) full steps/s. TMC2209 datasheet: stealthChop is
+  // used while TSTEP >= TPWMTHRS, TSTEP = time per 1/256 microstep in 1/12 MHz clocks, so a speed
+  // of fs full steps/s is TSTEP = 12e6 / (256 * fs) = 46875 / fs.
+  if (cfg[KS_CFG_FLAGS] & 0x04) {
+    driver.disableStealthChop();
+    driver.setStealthChopDurationThreshold(0);
+  } else {
+    driver.enableStealthChop();
+    uint32_t fs = ((uint32_t)cfg[KS_CFG_FLAGS]) >> 8;
+    uint32_t thr = ((cfg[KS_CFG_FLAGS] & 0x08) && fs) ? max(1UL, min(46875UL / fs, 0xFFFFFUL)) : 0;
+    driver.setStealthChopDurationThreshold(thr);   // 0 = never switch
+  }
   if (cfg[KS_CFG_FLAGS] & 0x01) driver.enableInverseMotorDirection(); else driver.disableInverseMotorDirection();
   driver.setStallGuardThreshold(constrain(cfg[KS_CFG_STALL_THRESH], 0, 255));
   driver.setCoolStepDurationThreshold(0xFFFFF);  // StallGuard/DIAG active at all speeds

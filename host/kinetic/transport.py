@@ -150,6 +150,12 @@ class _SimNode:
         self.magnet_rev = magnet_rev
         self.mount = mount          # magnet angle (counts) at the physical top
         self.phys_fs = 0.0          # where the load really is, in full steps below the top
+        # what the motor + load can really do: above these the rotor slips and stops following
+        # the steps (and stays stalled until the step rate drops), like a real stepper
+        self.stall_fs = 2000.0      # full steps/s (600 RPM)
+        self.stall_acc_fs = 8000.0  # full steps/s² (40 rev/s²)
+        self.stalled = False
+        self.jog_speed = 0.0        # microsteps/s of the current jog (the firmware's setSpeedInHz)
         # non-volatile memory (flash)
         self.cal: dict | None = None       # {"raw", "ms", "pos"}
         self.rec: dict | None = None       # {"pos", "ms", "clean"}
@@ -266,7 +272,10 @@ class _SimNode:
     def step(self, dt: float, now: float):
         amax = max(1.0, self.cfg[4])
         vmax = max(1.0, self.cfg[3])
+        if self.jog_target is not None and not self.streaming and self.jog_speed > 0:
+            vmax = self.jog_speed          # firmware: jog speed comes with the command, not the cap
         before = self.steps
+        v_before = self.vel
         if self.homing_until:       # limit-switch / StallGuard style homing (not memory mode)
             if now >= self.homing_until:
                 self.homing_until = 0.0
@@ -309,7 +318,15 @@ class _SimNode:
                 self.target = self.jog_target      # hold here afterwards
                 self.jog_target = None
                 self.vel = 0.0
-        self.phys_fs += self._dir_sign() * (self.steps - before) / self.ms
+        if self.stall_fs:
+            vfs = abs(self.vel) / self.ms
+            afs = abs(self.vel - v_before) / max(dt, 1e-6) / self.ms
+            if vfs > self.stall_fs or afs > self.stall_acc_fs * 1.02:
+                self.stalled = True
+            elif self.stalled and vfs < 0.3 * self.stall_fs:
+                self.stalled = False
+        if not self.stalled:
+            self.phys_fs += self._dir_sign() * (self.steps - before) / self.ms
         # position record: dirty while moving, clean after 2 s at rest outside the show
         moving = abs(self.vel) > 1
         if self.homed and self.cal:
@@ -566,6 +583,7 @@ class SimTransport(Transport):
             nd.restored = nd.restored_host = nd.pos_lost = False
         elif cmd == P.C_JOG and not nd.streaming:
             nd.enabled = True
+            nd.jog_speed = float(max(1, a[1]))
             if nd.limits_on() and nd.homed and a[2] != 1:
                 base = nd.jog_target if nd.jog_target is not None else nd.steps
                 nd.jog_target = nd.clamp(base + a[0])

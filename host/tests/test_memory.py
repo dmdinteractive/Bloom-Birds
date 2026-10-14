@@ -196,9 +196,9 @@ def test_setup_wizard_on_a_miswired_board(rig):
     def true_mm():
         return fresh.phys_fs * fresh.ms / spm
 
-    async def idle():
+    async def idle(limit=20):
         await asyncio.sleep(0.4)
-        for _ in range(200):
+        for _ in range(int(limit * 10)):
             if not eng.wizard or not eng.wizard["busy"]:
                 return
             await asyncio.sleep(0.1)
@@ -258,8 +258,9 @@ def test_setup_wizard_on_a_miswired_board(rig):
 
         # 5. test moves, 6. finish
         eng.wiz_test()
-        await idle()
+        await idle(60)                            # slow, careful moves (a third of top speed)
         assert eng.wizard["test_done"] and abs(true_mm()) < 0.5
+        assert eng.wizard["step"] == "speed"      # the speed test is offered next (optional)
         eng.wiz_finish()
         assert eng.wizard is None
 
@@ -472,7 +473,7 @@ def test_wizard_for_continuous_motor_skips_limits(rig):
         await idle()
         eng.wiz_mechanism("continuous", 1.0, True)
         await idle()
-        assert eng.wizard_snapshot()["steps"] == ["mechanism", "direction", "encoder", "test", "finish"]
+        assert eng.wizard_snapshot()["steps"] == ["mechanism", "direction", "encoder", "test", "speed", "finish"]
         before = fresh.phys_fs
         eng.wiz_direction_test()
         await idle()
@@ -500,3 +501,51 @@ def test_groups_follow_renumbering(rig):
     eng.remove_motors([1])
     assert cfg.data["groups"] == [{"name": "left", "motors": [0]}, {"name": "right", "motors": [1, 2]}]
     assert eng.eval_ctx()["groups"] == {"left": [0], "right": [1, 2]}
+
+
+# ---------------------------------------------------------------- the speed test
+def test_speed_test_finds_limits_below_the_stall_and_keeps_position(rig):
+    """The simulated motors stall above 600 RPM / 40 rev/s² (like a real stepper with a load).
+    The speed test must stop below that, suggest limits with a margin, and leave the motor's
+    idea of its position matching where the load really is."""
+    cfg, tx, eng = rig
+    i = 1
+    n1 = node(tx, i)
+    full = 250 / (3.141592653589793 * cfg.mech["spool_diameter_mm"]) * cfg.mech["full_steps_per_rev"]
+    cfg.motors[i].update({"commissioned": True, "bottom_fs": round(full, 2), "travel_mm": None,
+                          "max_speed": 300.0, "max_accel": 1500.0, "node_mac": n1.mac})
+    n1.lim = {"on": True, "lo": 0, "hi": int(full * n1.ms), "ms": n1.ms}
+    upr = cfg.unit_per_rev(i)
+    stall_v = n1.stall_fs / cfg.mech["full_steps_per_rev"] * upr          # mm/s
+    stall_a = n1.stall_acc_fs / cfg.mech["full_steps_per_rev"] * upr      # mm/s²
+
+    async def go():
+        runner = asyncio.create_task(eng.run())
+        await asyncio.sleep(0.6)
+        eng.wiz_start(n1.mac, i, speed_only=True)
+        await asyncio.sleep(1.0)
+        assert eng.wizard["step"] == "speed"
+        eng.wiz_speed_test()
+        for _ in range(1200):
+            await asyncio.sleep(0.1)
+            if not eng.wizard["busy"]:
+                break
+        r = eng.wizard["speed"]
+        assert eng.wizard["error"] == "", eng.wizard["error"]
+        eng.wiz_speed_save(True)
+        eng.wiz_finish()
+        await asyncio.sleep(0.6)
+        runner.cancel()
+        return r
+
+    r = asyncio.run(go())
+    assert r["v_ok"] and r["a_ok"]
+    assert 300 < r["v_ok"] <= stall_v and r["a_ok"] <= stall_a * 1.05
+    assert any(not lv["ok"] for lv in r["levels"])                 # it did find the edge
+    assert cfg.motors[i]["max_speed"] == r["v_save"] < r["v_ok"]
+    assert cfg.motors[i]["max_accel"] == r["a_save"] < r["a_ok"]
+    # after missing steps on purpose, the position was re-synced to the encoder
+    believed, true = believed_vs_true(cfg, tx, i)
+    assert abs(believed - true) < 0.5, (believed, true)
+    assert abs(n1.steps / n1.ms - n1.phys_fs * (1 if not n1.wiring_rev else -1)) < 2   # steps agree with the load
+    assert n1.lim_lo() <= n1.steps <= n1.lim_hi()

@@ -109,3 +109,7 @@
 .seg { display: flex; gap: 6px; }
 .stepper .step-val { min-width: 110px; display: flex; align-items: center; justify-content: center; font-family: var(--mono);
   background: var(--field); border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); }
+
+/* speed test results */
+.speed-table th { text-align: left; font-size: 13px; color: var(--ink-2, #555); padding: 4px 8px; }
+.speed-table tr.bad td { color: #c62828; }

@@ -195,7 +195,7 @@ function renderClipList() {
   markPlaying();
 }
 function selectClip(id) {
-  S.selClip = id; setSel([]); S.selMotor = 0;
+  S.selClip = id; setSel([]); S.selMotor = 0; S.userEdit = null;
   renderClipList(); renderPlaylist(); renderEditor(); requestRender();
 }
 $("#clipList").addEventListener("click", (ev) => {
@@ -230,11 +230,13 @@ const prop = (label, inner, help = "") =>
   `<div class="p-lab">${label}</div><div class="p-val">${inner}</div>${help ? `<div class="p-help">${esc(help)}</div>` : ""}`;
 /** Slider + numeric box bound to the same value. scope: p (pattern param), pose, c (clip field). */
 function sliderProp(key, d, value, scope = "p") {
-  const v = value ?? d.default;
+  // d.scale: shown to the user multiplied (e.g. stroke 0..0.5 shown as 0..100 %)
+  const k = d.scale || 1, v = (value ?? d.default) * k, st = d.step * k;
   const unit = d.unit ?? UNITS[key] ?? "";
+  const lo = +(d.min * k).toFixed(6), hi = +(d.max * k).toFixed(6), sc = k !== 1 ? ` data-scale="${k}"` : "";
   return prop(`<label for="f_${scope}_${key}">${esc(d.label.replace(/ \((s|deg)\)$/, ""))}</label>`,
-    `<input type="range" id="f_${scope}_${key}" data-${scope}="${key}" min="${d.min}" max="${d.max}" step="${d.step}" value="${v}">
-     <input type="number" class="num" id="n_${scope}_${key}" data-${scope}="${key}" min="${d.min}" max="${d.max}" step="${d.step}" value="${fmtNum(v, d.step)}" aria-label="${esc(d.label)}">
+    `<input type="range" id="f_${scope}_${key}" data-${scope}="${key}"${sc} min="${lo}" max="${hi}" step="${st}" value="${v}">
+     <input type="number" class="num" id="n_${scope}_${key}" data-${scope}="${key}"${sc} min="${lo}" max="${hi}" step="${st}" value="${fmtNum(v, st)}" aria-label="${esc(d.label)}">
      <span class="unit">${unit}</span>`, d.help);
 }
 function syncPair(t) {
@@ -262,7 +264,15 @@ function renderEditor() {
     } else {
       h += sec("Motion");
       const common = S.patterns[c.pattern]?.common;
-      for (const d of S.common) if (!common || common.includes(d.key)) h += sliderProp(d.key, d, c.params[d.key]);
+      for (const d of S.common) {
+        if (common && !common.includes(d.key)) continue;
+        if (d.only && !d.only.includes(c.pattern)) continue;
+        if (d.show_if && Object.entries(d.show_if).some(([k, v]) => (c.params[k] ?? S.common.find((x) => x.key === k)?.default) !== v)) continue;
+        if (d.type === "choice") h += prop(`<label for="pc_${d.key}">${esc(d.label)}</label>`, `<select id="pc_${d.key}" data-pc="${d.key}">${Object.entries(d.options).map(([k, v]) =>
+          `<option value="${k}" ${(c.params[d.key] ?? d.default) === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`, d.help);
+        else h += sliderProp(d.key, d, c.params[d.key]);
+      }
+      h += `<div class="p-full fitbox" id="fitbox"></div>`;
       const extra = S.patterns[c.pattern]?.params || [];
       if (extra.length) h += sec("Shape");
       for (const d of extra) {
@@ -287,6 +297,7 @@ function renderEditor() {
         ? `<button class="btn small" data-act="copyToAll">Copy to All Axes</button><button class="btn small" data-act="useShared">Revert to Shared</button>`
         : `<button class="btn small" data-act="makeOwn">Create Curve for ${esc(S.config.motors[S.selMotor]?.name)}</button>`) + `</div>`;
     }
+    h += `<div class="p-full fitbox" id="fitbox"></div>`;
     h += sec("Stagger") + sliderProp("stagger", { label: "Spread", min: 0, max: Math.max(1, c.duration), step: 0.1, default: 0,
       help: "Total delay spread across axes. One curve becomes a traveling wave." }, c.stagger, "c");
     h += prop(`<label for="c_sby">Order</label>`, `<select id="c_sby" data-c="stagger_by">
@@ -314,6 +325,7 @@ function renderEditor() {
   ed.innerHTML = h;
   updateKeyBox();
   updateSoloHint();
+  renderFit();
 }
 // ---- shaping (clip["mods"]) and targets: shared by pattern and timeline clips
 const groupNames = () => (S.config.groups || []).map((g) => g.name).filter(Boolean);
@@ -384,7 +396,8 @@ $("#editor").addEventListener("input", (ev) => {
   const num = (lo, hi) => clamp(parseFloat(t.value), lo, hi);
   if (t.dataset.p !== undefined) {
     if (t.value === "" || isNaN(parseFloat(t.value))) return;
-    c.params[t.dataset.p] = num(parseFloat(t.min), parseFloat(t.max)); syncPair(t); showChanged();
+    c.params[t.dataset.p] = num(parseFloat(t.min), parseFloat(t.max)) / (+t.dataset.scale || 1); syncPair(t);
+    S.userEdit = c.id; showChanged();
   } else if (t.dataset.pose !== undefined) {
     if (t.value === "") return;
     const i = +t.dataset.pose; c.params.values = c.params.values || [];
@@ -422,7 +435,8 @@ $("#editor").addEventListener("change", (ev) => {
   else if (k === "snap") { c.snap = t.value; showChanged(); }
   else if (k === "pattern") { c.pattern = t.value; c.params = { ...patternDefaults(t.value), ...c.params }; if (t.value === "pose" && !c.params.values) c.params.values = patternDefaults("pose").values; showChanged(); renderEditor(); }
   else if (k === "mode" || k === "stagger_by") { c[k] = t.value; showChanged(); renderEditor(); }
-  else if (t.dataset.pb) { c.params[t.dataset.pb] = t.checked; showChanged(); }
+  else if (t.dataset.pb) { c.params[t.dataset.pb] = t.checked; S.userEdit = c.id; showChanged(); }
+  else if (t.dataset.pc) { c.params[t.dataset.pc] = t.value; S.userEdit = c.id; showChanged(); renderEditor(); }
   else if (k === "target") { c.target = t.value || undefined; showChanged(); }
   else if (t.dataset.mb) { c.mods = c.mods || {}; c.mods[t.dataset.mb] = t.checked; showChanged(); }
   else if (t.dataset.mc) { c.mods = c.mods || {}; c.mods[t.dataset.mc] = t.value; showChanged(); }
@@ -476,6 +490,7 @@ $("#editor").addEventListener("click", (ev) => {
     delete c.tracks[String(S.selMotor)]; c.mode = "shared"; setSel([]); showChanged(); renderEditor();
   } else if (act === "delKey") deleteSelectedKey();
   else if (act === "copyKeys") copyKeys();
+  else if (act === "fitPeriod" || act === "bestRamp" || act === "stretchFit") applyFit(c, act);
   else if (act === "pasteKeys") pasteKeys();
   else if (act === "selAll") { setSel([...activeTrack(c)]); updateKeyBox(); }
 });
@@ -632,12 +647,67 @@ const requestRender = debounce(async () => {
   try {
     const r = await api("POST", "/api/render", { clip: c, clips: S.show.clips });
     S.render = r; S.renderFor = c.id;
+    // design by stroke: a pattern the user just changed never asks for more than the motors can do
+    const f = r.fit;
+    if (f && f.kind === "period" && !f.jumps && S.userEdit === c.id && f.scale * (f.margin || 1.1) > 1.0005 &&
+        Math.abs((c.params.period ?? 12) - f.base) < 1e-6 && f.min_base) {
+      const np = Math.min(120, Math.ceil(f.min_base * 10) / 10);
+      c.params.period = np;
+      toast(np >= 120 ? "Even a 120 s period is too fast for this stroke: make the stroke smaller" : `Period raised to ${np} s, the fastest the motors can do this stroke`, np >= 120);
+      renderEditor(); showChanged(); return;
+    }
+    renderFit();
     const bad = r.limited.filter(Boolean).length;
     const w = $("#limitWarning");
     w.hidden = !bad;
     if (bad) w.textContent = "Rate limit: segments marked in red exceed the configured max speed or acceleration and will lag. Increase period/length, reduce amplitude, or raise limits in Setup.";
   } catch (e) { S.render = null; }
 }, 180);
+
+function applyFit(c, act) {
+  const f = S.render?.fit; if (!f || S.renderFor !== c.id) return;
+  if (act === "fitPeriod") c.params.period = Math.min(120, Math.ceil(f.min_base * 10) / 10);
+  else if (act === "bestRamp") { c.params.ramp = f.best_ramp; S.userEdit = c.id; }
+  else if (act === "stretchFit") {
+    const k = Math.ceil(f.min_base) / c.duration;
+    c.duration = Math.ceil(f.min_base);
+    for (const tr of Object.values(c.tracks)) for (const key of tr) key[0] = Math.round(key[0] * k * 1000) / 1000;
+    if (c.stagger) c.stagger = Math.round(c.stagger * k * 10) / 10;
+    if (c.bpm) c.bpm = Math.round((c.bpm / k) * 10) / 10;
+  }
+  renderEditor(); showChanged({ structure: true });
+}
+// "Fastest cycle" readout under the motion settings (from the Pi's fit of this clip to the motors)
+function renderFit() {
+  const box = $("#fitbox"), c = clipById(S.selClip);
+  if (!box || !c) return;
+  const f = S.renderFor === c.id ? S.render?.fit : null;
+  if (!f || !f.kind) { box.innerHTML = ""; return; }
+  const mname = (i) => S.config.motors[i]?.name || `M${i + 1}`;
+  const lim = f.scale > 0 ? `limited by ${esc(mname(f.motor))} ${f.limit}` : "";
+  let h = "";
+  if (f.kind === "period") {
+    const p = c.params.period ?? 12, pct = f.scale > 0 ? Math.min(100, Math.round(f.scale * 100)) : 0;
+    h += `<div class="fit-line"><b>Fastest cycle for this stroke: ${f.min_base ? fmtNum(Math.ceil(f.min_base * 10) / 10, 0.1) + " s" : "—"}</b>`;
+    if (f.scale > 0) h += ` <span class="sub">· now ${fmtNum(p, 0.1)} s uses ${pct}% of the motors' limits · ${lim}</span>`;
+    h += `</div>`;
+    if (f.scale * (f.margin || 1.1) > 1.0005 && f.min_base) h += `<div class="fit-line warn">Too fast: strokes will be cut short. <button class="btn small" data-act="fitPeriod">Use ${fmtNum(Math.min(120, Math.ceil(f.min_base * 10) / 10), 0.1)} s</button></div>`;
+    else if (f.min_base && Math.ceil(f.min_base * 10) / 10 < p - 0.05) h += `<div class="fit-line"><button class="btn small" data-act="fitPeriod">Use the fastest (${fmtNum(Math.ceil(f.min_base * 10) / 10, 0.1)} s)</button></div>`;
+    if (f.best_ramp !== undefined && Math.abs((c.params.ramp ?? 0.25) - f.best_ramp) > 0.015)
+      h += `<div class="fit-line">Ramp ${f.best_ramp.toFixed(2)} uses top speed and acceleration fully. <button class="btn small" data-act="bestRamp">Use it</button></div>`;
+    const amp = c.params.amplitude ?? 0.3, tr = S.tick?.travel || [], units = S.tick?.units || [], kinds = S.tick?.kinds || [];
+    const seen = new Map();
+    tr.forEach((t, i) => { if (kinds[i] !== "continuous" && t > 0) { const k = `${fmtNum(2 * amp * t, 1)} ${units[i] || "mm"}`; seen.set(k, [...(seen.get(k) || []), mname(i)]); } });
+    if (seen.size) h += `<div class="fit-line sub">Stroke ${Math.round(amp * 200)}% = ${[...seen].slice(0, 3).map(([k, ms]) => `${k} (${esc(ms.length > 2 ? ms[0] + "–" + ms[ms.length - 1] : ms.join(", "))})`).join(", ")}</div>`;
+  } else if (f.kind === "duration") {
+    if (f.scale * (f.margin || 1.1) > 1.0005) h += `<div class="fit-line warn">This curve asks for more than ${esc(mname(f.motor))} can do (${f.limit}); moves will be cut short.
+      <button class="btn small" data-act="stretchFit">Stretch to ${fmtNum(Math.ceil(f.min_base), 1)} s</button></div>`;
+    else if (f.scale > 0) h += `<div class="fit-line sub">Within the motors' limits (${Math.round(f.scale * 100)}% of what ${esc(mname(f.motor))} can do).</div>`;
+  }
+  if ((S.tick?.playback?.speed || 1) > 1 && f.scale * (S.tick.playback.speed) * (f.margin || 1.1) > 1)
+    h += `<div class="fit-line sub">At the panel's ${Math.round(S.tick.playback.speed * 100)}% speed this may be cut short.</div>`;
+  box.innerHTML = h;
+}
 
 function renderTraceSel() {
   $("#traceSel").innerHTML = `<option value="-1">None</option>` +
@@ -1145,7 +1215,9 @@ const MECH_FIELDS = [
   { key: "run_current_pct", label: "Run current", unit: "%", step: 1 },
   { key: "hold_current_pct", label: "Hold current", unit: "%", step: 1 },
   { key: "pd_volts", label: "Supply request (USB-PD)", unit: "V", options: [9, 12, 15, 20] },
-  { key: "spreadcycle", label: "SpreadCycle chopper", bool: true, help: "Louder, more torque at speed. Disables StallGuard homing." },
+  { key: "driver_mode", label: "Driver mode", options: ["auto", "stealth", "spread"], labels: { auto: "Auto: quiet when slow, strong when fast", stealth: "Always silent (stealthChop)", spread: "Always strong (spreadCycle)" },
+    help: "stealthChop is near-silent but loses torque at speed; spreadCycle keeps torque but hums. Auto switches at the speed below (node firmware 4 or newer). StallGuard homing needs stealthChop." },
+  { key: "switch_rpm", label: "Switch speed", unit: "motor RPM", step: 10, help: "Auto mode: above this motor speed the driver changes to spreadCycle." },
   { key: "invert_dir", label: "Invert motor direction", bool: true, help: "Default for motors not yet through Motor Setup. Set-up motors keep their own direction." },
   { key: "invert_encoder", label: "Invert encoder", bool: true, help: "Default for motors not yet through Motor Setup." },
   { sec: "Homing" },
