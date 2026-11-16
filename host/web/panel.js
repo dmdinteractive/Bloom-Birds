@@ -1,11 +1,11 @@
 /* Kinetic operator panel — touch UI for the 7" Touch Display 2 (1280×720).
- * Talks to the same controller as the full editor: /api/state, /api/show, /api/config and the /ws socket.
+ * Talks to the same controller as the Moves screen: /api/state, /api/show, /api/config and the /ws socket.
  * No text entry anywhere: steppers, toggles and buttons only (the OS keyboard can't show over kiosk mode).
  */
 "use strict";
 
 const P = { config: null, show: null, host: null, simulate: false, tick: null, ws: null, wsOk: false,
-  selAxis: 0, events: [], lastWarn: null, cardsKey: "", actionsKey: "", plKey: "" };
+  selAxis: 0, events: [], lastWarn: null, cardsKey: "", actionsKey: "", moves: null };
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -14,7 +14,6 @@ const fmtTime = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); retur
 const led = (st) => `<span class="led ${st || ""}"></span>`;
 const pct = (v) => `${Math.round(v * 100)}%`;
 const nAxes = () => P.config.motors.length;
-const clipById = (id) => P.show?.clips.find((c) => c.id === id);
 
 async function api(method, url, body) {
   const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
@@ -53,9 +52,9 @@ const confirmBox = (msg, ok = "OK", danger = false) =>
 // ------------------------------------------------------------ data
 async function loadState() {
   const st = await api("GET", "/api/state");
-  P.config = st.config; P.show = st.show; P.host = st.host; P.simulate = st.simulate;
+  P.config = st.config; P.show = st.show; P.host = st.host; P.simulate = st.simulate; P.moves = st.moves;
   P.selAxis = clamp(P.selAxis, 0, nAxes() - 1);
-  P.plKey = ""; renderPlaylist(); renderStartToggles(); renderSystem();
+  renderFlap(true); renderSystem();
 }
 function connectWs() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
@@ -66,7 +65,7 @@ function connectWs() {
     const m = JSON.parse(ev.data);
     if (m.type === "tick") {
       P.tick = m; if (m.events) addEvents(m.events);
-      // the show was switched (by an external trigger or the editor): reload it
+      // the show was changed on another screen: reload it
       if (P.showRev !== undefined && m.show_rev !== P.showRev && !P.reloading) {
         P.reloading = true; loadState().finally(() => { P.reloading = false; });
       }
@@ -122,7 +121,7 @@ const slotFault = (i) => (isEmptySlot(i) ? "" : nodeFault(nodeFor(i)));
 const nodeFor = (i) => (P.tick?.nodes || []).find((nd) => nd.online && nd.id === i) || (P.tick?.nodes || []).find((nd) => nd.id === i);
 
 // ------------------------------------------------------------ top bar + status
-const MODE = { idle: "IDLE", playlist: "SHOW RUNNING", solo: "PREVIEW (LOOPING ONE CLIP)", hold: "HOLDING", park: "PARKING", trigger: "TRIGGERED CLIP" };
+const MODE = { idle: "IDLE", play: "SHOW RUNNING", hold: "HOLDING", park: "PARKING" };
 function renderTop() {
   const tk = P.tick;
   const L = [`<span class="light">${led(P.wsOk ? "on" : "bad")}Controller</span>`];
@@ -157,33 +156,24 @@ $("#btnEnable").onclick = async () => {
 $("#btnStop").onclick = () => { send("stop_all"); toast("All axes stopping"); };
 
 // ------------------------------------------------------------ run view
-function entryLength(e) { const c = clipById(e.clip); return (c?.duration || 0) * Math.max(1, e.repeat || 1); }
+const moveOf = () => P.tick?.move || P.show?.moves?.[0];
+const moveLabel = (m) => P.moves?.[m?.type]?.label || "—";
+function fitText(fit) {
+  if (!fit) return "";
+  return fit.ok ? `Fastest these motors can flap this far: ${fit.fastest.toFixed(1)} s`
+    : `Too fast for the motors: they will lag. Fastest for this stroke is ${fit.fastest.toFixed(1)} s.`;
+}
 function renderRun() {
   const tk = P.tick; if (!tk) return;
-  const c = clipById(tk.clip);
+  const m = moveOf(), playing = tk.mode === "play";
   $("#nowMode").textContent = MODE[tk.mode] || tk.mode.toUpperCase();
-  $("#nowClip").textContent = c && (tk.mode === "playlist" || tk.mode === "solo" || tk.mode === "trigger") ? c.name : "—";
-  let frac = 0, time = "—", next = "";
-  if (tk.mode === "playlist" && P.show.playlist.length) {
-    const e = P.show.playlist[tk.entry % P.show.playlist.length];
-    const len = entryLength(e);
-    frac = len ? clamp(tk.entry_t / len, 0, 1) : 0;
-    time = `${fmtTime(tk.entry_t)} / ${fmtTime(len)}`;
-    const pl = P.show.playlist;
-    for (let k = 1; k <= pl.length; k++) {
-      const n = pl[(tk.entry + k) % pl.length];
-      if (n.enabled !== false && clipById(n.clip)) { next = `Next: ${clipById(n.clip).name}`; break; }
-    }
-  } else if (tk.mode === "trigger" && c && tk.interrupt) {
-    frac = clamp(1 - tk.interrupt.left / c.duration, 0, 1); time = `${fmtTime(tk.interrupt.left)} left`; next = "Then back to the show";
-  } else if (tk.mode === "solo" && c) {
-    frac = (tk.clip_t % c.duration) / c.duration; time = `${fmtTime(tk.clip_t % c.duration)} / ${fmtTime(c.duration)}`;
-  }
-  $("#nowBar").style.width = `${frac * 100}%`;
-  $("#nowTime").textContent = time;
-  $("#nowNext").textContent = next;
-  const pb = tk.playback || { speed: 1, depth: 1 };
-  $("#nowAdj").textContent = pb.speed !== 1 || pb.depth !== 1 ? `Adjusted: speed ${pct(pb.speed)}, depth ${pct(pb.depth)}` : "";
+  $("#nowClip").textContent = playing ? moveLabel(m) : "—";
+  $("#nowBar").style.width = `${playing && tk.phase !== null ? tk.phase * 100 : 0}%`;
+  $("#nowTime").textContent = playing && m ? `${m.period.toFixed(1)} s per flap` : "—";
+  $("#nowNext").textContent = "";
+  const adj = $("#nowAdj");
+  adj.textContent = playing && tk.fit && !tk.fit.ok ? fitText(tk.fit) : "";
+  adj.style.color = "#8a5a00";
 }
 $$("[data-cmd]").forEach((b) => b.addEventListener("click", async () => {
   if (b.dataset.cmd === "play" && !P.tick?.armed) {
@@ -331,78 +321,54 @@ $("#axisActions").addEventListener("click", async (ev) => {
   }
 });
 
-// ------------------------------------------------------------ playlist view
-const saveShow = (() => { let t; return () => { clearTimeout(t); t = setTimeout(() => api("PUT", "/api/show", P.show).catch((e) => toast("Save failed: " + e.message, true)), 200); }; })();
-function renderPlaylist() {
-  if (!P.show) return;
-  const pl = P.show.playlist;
-  const total = pl.filter((e) => e.enabled !== false).reduce((a, e) => a + entryLength(e), 0);
-  $("#plTotal").textContent = `${pl.filter((e) => e.enabled !== false).length} of ${pl.length} on · cycle ${fmtTime(total)}`;
-  $("#plRows").innerHTML = pl.map((e, i) => {
-    const c = clipById(e.clip), on = e.enabled !== false;
-    return `<div class="pl-row ${on ? "" : "off"}" data-i="${i}">
-      <button class="tog" role="switch" aria-checked="${on}" data-tog="${i}" aria-label="Clip on/off"></button>
-      <span class="pl-num">${i + 1}</span>
-      <div><div class="pl-name">${esc(c?.name || "?")}</div><div class="pl-sub">${c?.type === "timeline" ? "Timeline" : c?.type === "layers" ? "Layered" : "Pattern"} · ${fmtTime(c?.duration || 0)} each · ${fmtTime(entryLength(e))} total</div></div>
-      <div class="stepper"><button class="mid" data-rep="${i}" data-d="-1" aria-label="Fewer repeats">−</button><div class="step-val">×${e.repeat || 1}</div><button class="mid" data-rep="${i}" data-d="1" aria-label="More repeats">+</button></div>
-      <div class="pl-order"><button class="mid" data-move="${i}" data-d="-1" aria-label="Move up" ${i === 0 ? "disabled" : ""}>▲</button><button class="mid" data-move="${i}" data-d="1" aria-label="Move down" ${i === pl.length - 1 ? "disabled" : ""}>▼</button></div>
-      <button class="mid" data-playfrom="${i}">Play from here</button></div>`;
-  }).join("") || `<p class="hint">The playlist is empty. Build it in the full editor.</p>`;
-  markPlaying();
-}
-function markPlaying() {
-  const tk = P.tick;
-  $$("#plRows .pl-row").forEach((r) => r.classList.toggle("playing", tk?.mode === "playlist" && +r.dataset.i === tk.entry % Math.max(1, P.show.playlist.length)));
-}
-$("#plRows").addEventListener("click", async (ev) => {
-  const b = ev.target.closest("button"); if (!b || b.disabled) return;
-  const pl = P.show.playlist;
-  if (b.dataset.tog !== undefined) { const e = pl[+b.dataset.tog]; e.enabled = e.enabled === false; }
-  else if (b.dataset.rep !== undefined) { const e = pl[+b.dataset.rep]; e.repeat = clamp((e.repeat || 1) + +b.dataset.d, 1, 99); }
-  else if (b.dataset.move !== undefined) {
-    const i = +b.dataset.move, j = i + +b.dataset.d;
-    if (j < 0 || j >= pl.length) return;
-    [pl[i], pl[j]] = [pl[j], pl[i]];
-  } else if (b.dataset.playfrom !== undefined) {
-    const i = +b.dataset.playfrom, c = clipById(pl[i].clip);
-    if (await confirmBox(`Play the show starting at "${c?.name}"?`, "Play")) send("play_entry", { index: i });
-    return;
-  } else return;
-  saveShow(); renderPlaylist();
-});
-
-// ------------------------------------------------------------ adjust view
-function renderAdjust() {
-  const pb = P.tick?.playback || { speed: 1, depth: 1 };
-  $("#speedVal").textContent = pct(pb.speed);
-  $("#depthVal").textContent = pct(pb.depth);
-  $$('[data-preset="speed"] .mid').forEach((b) => b.classList.toggle("cur", Math.abs(+b.dataset.v - pb.speed) < 0.001));
-  $$('[data-preset="depth"] .mid').forEach((b) => b.classList.toggle("cur", Math.abs(+b.dataset.v - pb.depth) < 0.001));
-}
-$("#v-adjust").addEventListener("click", (ev) => {
-  const b = ev.target.closest("button"); if (!b) return;
-  const pb = P.tick?.playback || { speed: 1, depth: 1 };
-  if (b.dataset.step) {
-    const k = b.dataset.step, lo = k === "speed" ? 0.25 : 0.1, hi = k === "speed" ? 2 : 1;
-    send("set_playback", { [k]: Math.round(clamp(pb[k] + +b.dataset.d, lo, hi) * 100) / 100 });
-  } else if (b.parentElement?.dataset.preset) {
-    send("set_playback", { [b.parentElement.dataset.preset]: +b.dataset.v });
-  } else if (b.id === "btnReset") {
-    send("set_playback", { speed: 1, depth: 1 }); toast("Speed and depth reset to 100%");
+// ------------------------------------------------------------ flap view
+// Steppers only (no typing on the touch screen). The knob list comes from the controller.
+const knobFmt = (p, v) => (p.unit === "%" ? pct(v) : `${v.toFixed(1)} s`);
+const knobStep = (p, v, d) => (p.key === "period" ? (v + d * 1e-9 < 2 || (v <= 2 && d < 0) ? 0.1 : 0.5) : p.step);
+function renderFlap(rebuild = false) {
+  const m = moveOf(), def = P.moves?.[m?.type]; if (!m || !def) return;
+  const grid = $("#flapGrid");
+  if (rebuild || !grid.children.length) {
+    grid.innerHTML = def.params.map((p) => `<div class="box">
+        <div class="box-h">${esc(p.label)}</div>
+        <div class="stepper big-step">
+          <button class="big" data-knob="${p.key}" data-d="-1" aria-label="${esc(p.label)} down">−</button>
+          <div class="step-val" data-val="${p.key}"></div>
+          <button class="big" data-knob="${p.key}" data-d="1" aria-label="${esc(p.label)} up">+</button>
+        </div>
+        ${p.key === "period" ? `<button class="mid wide" data-fastest="1" style="margin-top:8px">Set to fastest the motors can do</button>
+          <p class="hint" id="flapFit"></p>` : `<p class="hint">${esc(p.help)}</p>`}
+      </div>`).join("") + `<div class="box"><div class="box-h">Power-Up</div><div class="toggles" id="startToggles"></div></div>`;
+    renderStartToggles();
   }
+  for (const p of def.params) $(`[data-val="${p.key}"]`).textContent = knobFmt(p, m[p.key]);
+  const f = $("#flapFit"), fit = P.tick?.fit;
+  if (f) { f.textContent = fitText(fit); f.style.color = fit && !fit.ok ? "#c62828" : ""; }
+}
+$("#flapGrid").addEventListener("click", async (ev) => {
+  const st = ev.target.closest("[data-start]");
+  if (st) {
+    const k = st.dataset.start;
+    const r = await api("PUT", "/api/config", { [k]: !P.config[k] });
+    P.config = r.config; renderStartToggles(); return;
+  }
+  const b = ev.target.closest("button"); if (!b) return;
+  const m = moveOf(), def = P.moves?.[m?.type]; if (!m || !def) return;
+  if (b.dataset.fastest) {
+    const fit = P.tick?.fit; if (!fit?.fastest) return;
+    send("set_move", { knobs: { period: fit.fastest } }); toast(`Set to ${fit.fastest.toFixed(1)} s per flap`); return;
+  }
+  const p = def.params.find((x) => x.key === b.dataset.knob); if (!p) return;
+  const d = +b.dataset.d, step = knobStep(p, m[p.key], d);
+  const v = clamp(Math.round((m[p.key] + d * step) / step) * step, p.min, p.max);
+  send("set_move", { knobs: { [p.key]: Math.round(v * 1000) / 1000 } });
 });
 const START = [{ key: "autoplay", label: "Run show at power-up" }, { key: "auto_home", label: "Home axes before running" }];
 function renderStartToggles() {
+  if (!$("#startToggles")) return;
   $("#startToggles").innerHTML = START.map((s) =>
     `<label><button class="tog" role="switch" aria-checked="${!!P.config[s.key]}" data-start="${s.key}" aria-label="${esc(s.label)}"></button>${esc(s.label)}</label>`).join("");
 }
-$("#startToggles").addEventListener("click", async (ev) => {
-  const b = ev.target.closest("[data-start]"); if (!b) return;
-  const k = b.dataset.start;
-  const r = await api("PUT", "/api/config", { [k]: !P.config[k] });
-  P.config = r.config; renderStartToggles();
-});
-
 // ------------------------------------------------------------ system view
 function renderSystem() {
   const h = P.host || {}, tk = P.tick;
@@ -411,10 +377,9 @@ function renderSystem() {
   const homeBtn = $('[data-sys="home"]');
   if (homeBtn) homeBtn.textContent = memoryMode() ? "All Axes To Top" : "Home All Axes";
   const urls = [`http://${h.hostname || "raspberrypi"}.local:8080`, ...(h.ips || []).map((ip) => `http://${ip}:8080`)];
-  $("#sysInfo").innerHTML = `<dt>Full editor</dt><dd>${urls.map(esc).join("<br>")}</dd>
+  $("#sysInfo").innerHTML = `<dt>Moves screen</dt><dd>${urls.map(esc).join("<br>")}</dd>
     <dt>Bridge</dt><dd>${tk ? (tk.link ? esc(tk.port) + (tk.bridge ? ` · ch ${tk.bridge.channel}` : "") : "not connected") : "—"}</dd>
     <dt>Radio TX</dt><dd>${tk?.bridge ? `${tk.bridge.tx_ok} ok · ${tk.bridge.tx_fail} failed` : "—"}</dd>
-    <dt>Show</dt><dd>${esc(P.show?.name || "")}</dd>
     <dt>Axes</dt><dd>${nAxes()} configured</dd>`;
 }
 $("#v-system").addEventListener("click", async (ev) => {
@@ -443,7 +408,7 @@ $("#v-system").addEventListener("click", async (ev) => {
     if (ok) send("sim_power_cut", { save_works: a === "sim_cut" });
     return;
   }
-  const msg = { autostart: "Run the startup sequence? Axes will be found, configured, homed, then the show starts.",
+  const msg = { autostart: "Run the startup sequence? Axes will be found, configured and checked, then the show starts.",
     home: memoryMode() ? "Move every axis to its taught home position? The show stops." : "Home every axis? The show stops and all cables wind in to their home switches.",
     push_config: "Resend mechanics settings to every axis?" }[a];
   if (!(await confirmBox(msg, b.textContent))) return;
@@ -454,7 +419,7 @@ $("#v-system").addEventListener("click", async (ev) => {
 $$(".nav").forEach((b) => b.addEventListener("click", async () => {
   $$(".nav").forEach((x) => x.classList.toggle("active", x === b));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `v-${b.dataset.view}`));
-  if (b.dataset.view === "playlist" || b.dataset.view === "system") await loadState();   // pick up laptop edits
+  if (b.dataset.view === "flap" || b.dataset.view === "system") await loadState();   // pick up laptop edits
   P.cardsKey = ""; P.actionsKey = "";
 }));
 document.addEventListener("contextmenu", (e) => e.preventDefault());   // long-press menus off
@@ -467,11 +432,10 @@ function frame(ts) {
     lastSlow = ts; renderTop();
     if (view === "v-run") renderRun();
     if (view === "v-axes") renderAxes();
-    if (view === "v-adjust") renderAdjust();
-    if (view === "v-playlist") markPlaying();
+    if (view === "v-flap") renderFlap();
     if (view === "v-system") renderSystem();
   }
-  if (ts - lastState > 15000 && $("#modal").hidden && view !== "v-playlist") { lastState = ts; loadState().catch(() => {}); }
+  if (ts - lastState > 15000 && $("#modal").hidden) { lastState = ts; loadState().catch(() => {}); }
   requestAnimationFrame(frame);
 }
 loadState().then(() => { connectWs(); requestAnimationFrame(frame); }).catch((e) => {

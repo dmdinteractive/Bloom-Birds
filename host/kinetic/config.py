@@ -51,11 +51,10 @@ DEFAULT_CONFIG = {
     "serial_port": "auto",          # "auto" finds /dev/ttyACM* or /dev/ttyUSB*
     "simulate": False,              # True = no hardware, simulated motors
     "frame_rate": 50,               # position updates per second
-    "autoplay": True,               # start the playlist on power-up
+    "autoplay": True,               # start the show on power-up
     "auto_home": True,              # home every motor before autoplay (limit/stallguard modes)
     "assume_home_at_boot": False,   # manual homing only: treat power-up spot as zero
     "active_show": "default",
-    "playback": {"speed": 1.0, "depth": 1.0},   # operator adjustments from the touch panel
     "mechanics": {
         "spool_diameter_mm": 40.0,  # effective diameter where the cable wraps
         "full_steps_per_rev": 200,
@@ -85,7 +84,6 @@ DEFAULT_CONFIG = {
     },
     "layout": "line",
     "motors": [],   # filled by default_motors()
-    "groups": [],   # [{"name": "Left wing", "motors": [0, 2]}]: targets for clips and layers
 }
 
 

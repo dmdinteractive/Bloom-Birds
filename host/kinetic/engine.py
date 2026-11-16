@@ -1,8 +1,8 @@
-"""Playback engine: turns the show (clips + playlist) into a synchronized 50 Hz stream
-of motor positions, and manages the motors (discovery, config, homing, safety).
+"""Playback engine: turns the show (a looping move) into a synchronized 50 Hz stream of
+motor positions, and manages the motors (discovery, config, homing, safety).
 
 Flow every tick:
-    playlist/solo/hold source -> drops (0..1) -> crossfade -> millimetres -> Limiter
+    move/hold source -> heights (0..1) -> crossfade -> millimetres -> Limiter
     -> microsteps -> one broadcast FRAME for all motors.
 """
 from __future__ import annotations
@@ -14,7 +14,6 @@ import logging
 import re
 import threading
 import time
-import uuid
 from collections import deque
 from pathlib import Path
 
@@ -25,41 +24,24 @@ from .config import KINDS, Config, default_motors, is_preset_layout, relayout_mo
 log = logging.getLogger("kinetic.engine")
 
 
-def new_id() -> str:
-    return uuid.uuid4().hex[:8]
-
-
-DEFAULT_SHOW = {
-    "name": "default",
-    "playlist": [],
-    "clips": [],
-}
-
-
 def starter_show() -> dict:
-    """A small show so the sculpture does something on first boot."""
-    c1 = {"id": new_id(), "name": "Slow breath", "type": "pattern", "pattern": "breathe", "duration": 40,
-          "fade": 5, "params": {"center": 0.4, "amplitude": 0.25, "period": 16, "dwell": 0.2}}
-    c2 = {"id": new_id(), "name": "Rolling wave", "type": "pattern", "pattern": "wave", "duration": 60,
-          "fade": 6, "params": {"center": 0.5, "amplitude": 0.3, "period": 14, "dwell": 0.0,
-                                "wavelengths": 1.0, "direction": 0}}
-    c3 = {"id": new_id(), "name": "Cascade drop", "type": "timeline", "duration": 24, "fade": 5,
-          "mode": "shared", "stagger": 6, "stagger_by": "index", "wrap": True,
-          "tracks": {"all": [[0, 0.2, "smooth"], [8, 0.7, "smooth"], [12, 0.7, "smooth"], [20, 0.2, "smooth"]]}}
-    return {"name": "default", "clips": [c1, c2, c3],
-            "playlist": [{"clip": c1["id"], "repeat": 1}, {"clip": c2["id"], "repeat": 1},
-                         {"clip": c3["id"], "repeat": 2}]}
+    """What the sculpture does on first boot: one gentle flap."""
+    return {"name": "default", "moves": [M.default_move("flap")]}
 
 
-class ClipSource:
-    def __init__(self, engine: "Engine", clip_id: str, t0: float):
-        self.engine, self.clip_id, self.t0 = engine, clip_id, t0
+class MoveSource:
+    """Plays the show's move on a loop. Keeps its own count of flaps, so changing the
+    seconds-per-flap while it runs changes the pace without making the birds jump."""
+
+    def __init__(self, engine: "Engine", t0: float):
+        self.engine, self.last, self.phase = engine, t0, 0.0
 
     def eval(self, now: float) -> list[float]:
-        clip = self.engine.clip(self.clip_id)
-        if clip is None:
-            return self.engine.last_norm
-        return M.eval_clip(clip, now - self.t0, self.engine.cfg.motors, self.engine.eval_ctx())
+        e = self.engine
+        move = e.move()
+        self.phase += max(0.0, now - self.last) / max(1e-3, move["period"])
+        self.last = now
+        return M.eval_move(move, self.phase, e.cfg.motor_count, e.bird_order())
 
 
 class HoldSource:
@@ -90,23 +72,15 @@ class Engine:
         self.out_v = [0.0] * n
         self.desired_mm = [0.0] * n
         self.armed = False
-        self.mode = "idle"            # idle | playlist | solo | hold | park
+        self.mode = "idle"            # idle | play | hold | park
         self.source = HoldSource([0.0] * n)
         self.fade_from = None         # (source, start, duration)
-        self.entry_index = 0
-        self.entry_start = 0.0
-        self.solo_clip: str | None = None
-        # an external trigger playing a clip over the show: {"clip", "end", "resume": {...}}
-        self.interrupt: dict | None = None
-        self.triggers = None          # TriggerManager, attached by run.py
-        self.show_rev = 0             # bumps when the active show is switched (editors reload)
+        self.show_rev = 0             # bumps when the show is saved (other screens reload)
         self.seq = 0
         self.disarm_frames = 0
         self.startup = "waiting"
         self._started = time.monotonic()
-        # Show clock: advances at the operator's speed setting, so slowing the show
-        # down or speeding it up never makes positions jump.
-        self.vclock = 0.0
+        self.vclock = 0.0             # show clock, seconds
         # Position memory on the Pi side: last known good position of every node (by MAC),
         # so a node that reboots on its own (while the Pi keeps running) can be told where it was.
         self.last_known: dict[str, tuple[int, float]] = {}   # mac -> (microsteps, monotonic time)
@@ -273,26 +247,37 @@ class Engine:
         self.arm(False)
         self.send_cmd(P.C_STOP)
 
-    # ================================================================ show management
-    def eval_ctx(self) -> dict:
-        """What clips need besides time: motor groups and the clip library (for layered clips)."""
-        groups = {g["name"]: g.get("motors", []) for g in self.cfg.data.get("groups", []) if g.get("name")}
-        return {"groups": groups, "clips": {c["id"]: c for c in self.show.get("clips", [])}}
+    # ================================================================ show
+    def move(self) -> dict:
+        """The move the show loops (one for now; the list leaves room for more)."""
+        return self.show["moves"][0]
 
-    def clip(self, clip_id: str) -> dict | None:
-        for c in self.show.get("clips", []):
-            if c["id"] == clip_id:
-                return c
-        return None
+    def bird_order(self) -> list[int]:
+        """Each motor's place in line for the delay between birds. Only motors that have been
+        set up take a place, so one bird on the bench and five in the space run the same show."""
+        setup = [bool(m.get("commissioned")) for m in self.cfg.motors]
+        if not any(setup):
+            return list(range(len(setup)))
+        order, k = [], 0
+        for on in setup:
+            order.append(k)
+            k += 1 if on else 0
+        return order
+
+    def fit(self) -> dict:
+        """How the move sits against each bird's speed and acceleration limits."""
+        n = self.cfg.motor_count
+        active = [bool(m.get("commissioned")) and not self.cfg.is_continuous(i) for i, m in enumerate(self.cfg.motors)]
+        if not any(active):
+            active = [not self.cfg.is_continuous(i) for i in range(n)]
+        return M.move_fit(self.move(), [self.cfg.travel(i) for i in range(n)], [self.cfg.vmax(i) for i in range(n)],
+                          [self.cfg.amax(i) for i in range(n)], active)
 
     def show_path(self, name: str) -> Path:
         safe = "".join(ch for ch in name if ch.isalnum() or ch in "-_ ").strip() or "show"
         return self.shows_dir / f"{safe}.json"
 
-    def list_shows(self) -> list[str]:
-        return sorted(p.stem for p in self.shows_dir.glob("*.json"))
-
-    def load_show(self, name: str):
+    def load_show(self, name: str = "default"):
         p = self.show_path(name)
         loaded = None
         if p.exists():
@@ -302,26 +287,31 @@ class Engine:
                 bad = p.with_suffix(".corrupt")
                 p.replace(bad)
                 self.event(f"Show file {p.name} was unreadable ({e}); moved to {bad.name}", "warn")
-        if loaded is not None:
-            self.show = loaded
+            if isinstance(loaded, dict) and "moves" not in loaded:
+                # a show from the earlier clip-and-timeline software: keep the file, start fresh
+                old = p.with_name(p.stem + ".old-format.json")
+                p.replace(old)
+                self.event(f"Show file {p.name} is from the earlier software; kept as {old.name}", "warn")
+                loaded = None
+        if isinstance(loaded, dict):
+            self.show = {"name": name, "moves": [M.clean_move(m) for m in loaded.get("moves") or [] if isinstance(m, dict)]}
         else:
-            self.show = starter_show() if name == "default" else copy.deepcopy(DEFAULT_SHOW)
+            self.show = starter_show()
             self.show["name"] = name
             write_atomic(p, json.dumps(self.show, indent=2))
-        self.show.setdefault("clips", [])
-        self.show.setdefault("playlist", [])
-        self.cfg.data["active_show"] = self.show.get("name", name)
+        if not self.show["moves"]:
+            self.show["moves"] = [M.default_move("flap")]
+        self.cfg.data["active_show"] = name
 
-    def save_show(self, show: dict, name: str | None = None):
-        show = copy.deepcopy(show)
-        if name:
-            show["name"] = name
-        ids = {c["id"] for c in show.get("clips", [])}
-        show["playlist"] = [e for e in show.get("playlist", []) if e.get("clip") in ids]
-        self.show = show
-        write_atomic(self.show_path(show["name"]), json.dumps(show, indent=2))
-        if self.solo_clip and self.solo_clip not in ids:
-            self.hold()
+    def save_show(self, show: dict):
+        moves = [M.clean_move(m) for m in show.get("moves") or [] if isinstance(m, dict)] or [M.default_move("flap")]
+        self.show = {"name": self.show.get("name", "default"), "moves": moves}
+        write_atomic(self.show_path(self.show["name"]), json.dumps(self.show, indent=2))
+        self.show_rev += 1
+
+    def set_move(self, **knobs):
+        """Change knobs of the move (from a screen): takes effect at once, saved to disk."""
+        self.save_show({"moves": [{**self.move(), **knobs}] + self.show["moves"][1:]})
 
     # ================================================================ playback control
     def _switch(self, source, fade: float):
@@ -332,141 +322,27 @@ class Engine:
         self.fade_from = (current, now, max(0.0, fade)) if fade > 0 else None
         self.source = source
 
-    def _enabled_index(self, start: int) -> int | None:
-        """First playlist entry at or after `start` (wrapping) that is switched on."""
-        pl = self.show["playlist"]
-        for k in range(len(pl)):
-            i = (start + k) % len(pl)
-            if pl[i].get("enabled", True) and self.clip(pl[i]["clip"]):
-                return i
-        return None
-
-    def play(self, index: int = 0, force: bool = False):
-        """Run the playlist from `index`. force=True plays that entry even if switched off."""
-        pl = self.show["playlist"]
-        if not pl:
-            self.event("Playlist is empty", "warn")
-            return
-        i = index % len(pl) if force else self._enabled_index(index)
-        if i is None:
-            self.event("Every playlist entry is switched off", "warn")
-            self.hold()
-            return
-        self.mode = "playlist"
-        self.solo_clip = None
-        self.interrupt = None
-        self.entry_index = i
-        self._start_entry(first=True)
-
-    def play_entry(self, index: int):
-        self.play(index, force=True)
-
-    def _start_entry(self, first: bool = False):
-        pl = self.show["playlist"]
-        entry = pl[self.entry_index % len(pl)]
-        clip = self.clip(entry["clip"])
-        now = self.vclock
-        self.entry_start = now
-        fade = float(clip.get("fade", 3)) if clip else 2.0
-        if first:
-            fade = max(fade, 3.0)
-        self._switch(ClipSource(self, entry["clip"], now), fade)
-        if clip:
-            self.event(f"Playing \"{clip.get('name', 'clip')}\"")
-
-    def next(self):
-        if self.interrupt:                 # Next during a triggered clip: end it and carry on
-            self._resume()
-            return
-        if self.mode == "playlist":
-            i = self._enabled_index(self.entry_index + 1)
-            if i is not None:
-                self.entry_index = i
-                self._start_entry()
-
-    def solo(self, clip_id: str):
-        clip = self.clip(clip_id)
-        if not clip:
-            log.warning("solo: unknown clip %s (have %s)", clip_id, [c["id"] for c in self.show["clips"]])
-            return
-        self.mode = "solo"
-        self.interrupt = None
-        self.solo_clip = clip_id
-        self._switch(ClipSource(self, clip_id, self.vclock), max(1.5, float(clip.get("fade", 2))))
-        self.event(f"Previewing \"{clip.get('name', 'clip')}\" on loop")
+    def play(self):
+        """Run the show: ease from wherever the birds are into the move, then loop it."""
+        self.mode = "play"
+        self._switch(MoveSource(self, self.vclock), 3.0)
+        self.event(f"Playing \"{M.MOVES[self.move()['type']]['label']}\"")
 
     def hold(self):
         self.mode = "hold"
-        self.solo_clip = None
-        self.interrupt = None
         self._switch(HoldSource(self.last_norm), 0)
+
+    def hold_at(self, values: list[float], fade: float = 0.0):
+        """Go to fixed heights (0..1 per motor) and stay there."""
+        n = self.cfg.motor_count
+        self.mode = "hold"
+        self._switch(HoldSource((list(values) + [0.0] * n)[:n]), fade)
 
     def park(self):
         """Wind everything up to home, at the motors' max speed/accel."""
         self.mode = "park"
-        self.solo_clip = None
-        self.interrupt = None
         self._switch(HoldSource([0.0] * self.cfg.motor_count), 0)
-        self.event("Parking: winding all motors up")
-
-    # ---------------------------------------------------------------- external triggers
-    def play_once(self, clip_id: str, times: int = 1, fade: float | None = None) -> bool:
-        """Play a clip over whatever is running, then go back to it (the playlist resumes
-        where it left off). Triggering again while one is playing restarts the new clip but
-        keeps the original resume point."""
-        clip = self.clip(clip_id)
-        if not clip:
-            self.event("Trigger: that clip is no longer in the show", "warn")
-            return False
-        now = self.vclock
-        if self.interrupt:
-            resume = self.interrupt["resume"]
-        else:
-            resume = {"mode": self.mode, "entry": self.entry_index, "elapsed": now - self.entry_start,
-                      "solo": self.solo_clip, "values": list(self.last_norm),
-                      "clip_t": now - self.source.t0 if isinstance(self.source, ClipSource) else 0.0}
-        length = float(clip.get("duration", 10)) * max(1, int(times))
-        self.interrupt = {"clip": clip_id, "end": now + length, "resume": resume}
-        self.mode = "trigger"
-        self.solo_clip = None
-        f = float(clip.get("fade", 1.5)) if fade is None else float(fade)
-        self._switch(ClipSource(self, clip_id, now), max(0.3, f))
-        self.event(f"Trigger: playing \"{clip.get('name', 'clip')}\" then resuming")
-        return True
-
-    def _resume(self):
-        r = self.interrupt["resume"] if self.interrupt else {"mode": "hold", "values": list(self.last_norm)}
-        self.interrupt = None
-        now, fade = self.vclock, 2.0
-        mode = r["mode"]
-        pl = self.show["playlist"]
-        if mode == "playlist" and pl and r["entry"] < len(pl) and self.clip(pl[r["entry"]]["clip"]):
-            self.mode, self.entry_index = "playlist", r["entry"]
-            self.entry_start = now - r["elapsed"]
-            self._switch(ClipSource(self, pl[r["entry"]]["clip"], self.entry_start), fade)
-        elif mode == "playlist":
-            self.play()
-        elif mode == "solo" and r["solo"] and self.clip(r["solo"]):
-            self.mode, self.solo_clip = "solo", r["solo"]
-            self._switch(ClipSource(self, r["solo"], now - r["clip_t"]), fade)
-        elif mode == "park":
-            self.park()
-        else:                              # hold / idle: go back to where it was standing
-            self.mode = mode
-            self._switch(HoldSource(r["values"]), fade)
-        self.event("Trigger finished: resumed")
-
-    def switch_show(self, name: str | None = None, entry: int = 0):
-        """Load another show (if a name is given) and run its playlist from `entry` (0-based)."""
-        if name and name != self.show.get("name"):
-            if name not in self.list_shows():
-                self.event(f"Trigger: no show called \"{name}\"", "warn")
-                return
-            self.load_show(name)
-            self.show_rev += 1
-            self.cfg.save()
-            self.event(f"Switched to show \"{name}\"")
-        self.play(max(0, int(entry)))
+        self.event("Parking: moving all motors to home")
 
     def arm(self, on: bool):
         if on and self.wizard:
@@ -511,47 +387,12 @@ class Engine:
         if self.mode in ("hold", "park", "idle"):
             self.source = HoldSource([0.0] * n)
 
-    @property
-    def playback(self) -> dict:
-        pb = self.cfg.data.get("playback") or {}
-        return {"speed": M.clamp(float(pb.get("speed", 1.0)), 0.25, 2.0),
-                "depth": M.clamp(float(pb.get("depth", 1.0)), 0.1, 1.0)}
-
-    def set_playback(self, speed: float | None = None, depth: float | None = None, save: bool = True):
-        pb = self.playback
-        if speed is not None:
-            pb["speed"] = round(M.clamp(float(speed), 0.25, 2.0), 3)
-        if depth is not None:
-            pb["depth"] = round(M.clamp(float(depth), 0.1, 1.0), 3)
-        self.cfg.data["playback"] = pb
-        if not save:                    # live control from a fader: no disk write, no log line
-            return
-        self.cfg.save()
-        self.event(f"Playback set to speed {pb['speed'] * 100:.0f}%, depth {pb['depth'] * 100:.0f}%")
-
     def tick(self, dt: float):
-        pb = self.playback
-        self.vclock += dt * pb["speed"]
+        self.vclock += dt
         now = self.vclock
         n = self.cfg.motor_count
         self.limiter.vmax = [self.cfg.vmax(i) for i in range(n)]
         self.limiter.amax = [self.cfg.amax(i) for i in range(n)]
-
-        if self.interrupt and now >= self.interrupt["end"]:
-            self._resume()
-        if self.mode == "playlist" and self.show["playlist"]:
-            pl = self.show["playlist"]
-            entry = pl[self.entry_index % len(pl)]
-            clip = self.clip(entry["clip"])
-            length = (float(clip.get("duration", 30)) if clip else 5.0) * max(1, int(entry.get("repeat", 1)))
-            if now - self.entry_start >= length:
-                i = self._enabled_index(self.entry_index + 1)
-                if i is None:
-                    self.event("Every playlist entry is switched off; holding", "warn")
-                    self.hold()
-                else:
-                    self.entry_index = i
-                    self._start_entry()
 
         norm = self.source.eval(now)
         if len(norm) != n:
@@ -566,11 +407,9 @@ class Engine:
                 prev = (list(prev) + [0.0] * n)[:n]
                 norm = M.blend(prev, norm, w)
         self.last_norm = norm
-        depth = pb["depth"]
         cont = [self.cfg.is_continuous(i) for i in range(n)]
-        # positions: the depth limit compresses everything toward home.
-        # continuous rotation: the design value is a speed, and depth scales the speed.
-        self.desired_mm = [self.cfg.speed_from_norm(i, v) * depth if cont[i] else self._norm_to_mm(i, v * depth)
+        # continuous rotation: the value is a speed, not a height
+        self.desired_mm = [self.cfg.speed_from_norm(i, v) if cont[i] else self._norm_to_mm(i, v)
                            for i, v in enumerate(norm)]
         hi = [self.cfg.travel(i) for i in range(n)]
         lo = [-hi[i] if cont[i] else 0.0 for i in range(n)]
@@ -611,7 +450,7 @@ class Engine:
             now = time.monotonic()
             try:
                 self.tick(min(0.1, now - last) or period)
-            except Exception:  # noqa: BLE001 - never let a bad clip kill the loop
+            except Exception:  # noqa: BLE001 - never let a bad show file kill the loop
                 log.exception("tick failed")
                 self.hold()
             last = now
@@ -698,7 +537,7 @@ class Engine:
     #
     # Motor numbers are positions in the radio frame (M1 = slot 0 ...), so removing a motor from
     # the middle renumbers the ones after it: their boards are told their new number over the
-    # radio, and their setup data and per-motor show data move with them.
+    # radio, and their setup data moves with them.
 
     def add_motor(self) -> int:
         n = self.cfg.motor_count
@@ -713,7 +552,6 @@ class Engine:
         self.cfg.data["motors"] = motors
         self.cfg.save()
         self.resize()
-        self._shift_show(insert_at=n)
         self.event(f"Added motor M{n + 1}")
         return n
 
@@ -736,11 +574,6 @@ class Engine:
                 if sid == i:
                     self.send_cmd(P.C_SET_ID, mac=nd["mac"], args=[P.ID_UNASSIGNED])
             self.cfg.motors.pop(i)
-            self._shift_show(remove_at=i)
-        # groups: drop removed motors, shift the numbers after them
-        removed_set = set(ids)
-        for g in self.cfg.data.get("groups", []):
-            g["motors"] = sorted({j - sum(1 for r in removed_set if r < j) for j in g.get("motors", []) if j not in removed_set})
         # renumber the rest, and tell each remaining board its (possibly new) number
         old_ids = [m["id"] for m in self.cfg.motors]
         for new_id, m in enumerate(self.cfg.motors):
@@ -784,39 +617,6 @@ class Engine:
             unused = unused[1:]                 # always keep one
         self.remove_motors(unused)
         return len(unused)
-
-    def _shift_show(self, remove_at: int | None = None, insert_at: int | None = None):
-        """Keep per-motor show data (static poses, per-motor timeline curves) attached to the
-        right motor when motors are removed or added."""
-        changed = False
-        for c in self.show.get("clips", []):
-            vals = (c.get("params") or {}).get("values")
-            if isinstance(vals, list):
-                if remove_at is not None and remove_at < len(vals):
-                    vals.pop(remove_at)
-                    changed = True
-                elif insert_at is not None and insert_at <= len(vals):
-                    vals.insert(insert_at, vals[-1] if vals else 0.0)
-                    changed = True
-            tracks = c.get("tracks")
-            if c.get("mode") == "per_motor" and isinstance(tracks, dict):
-                new = {}
-                for k, v in tracks.items():
-                    if not k.isdigit():
-                        new[k] = v
-                        continue
-                    j = int(k)
-                    if remove_at is not None:
-                        if j == remove_at:
-                            continue
-                        j = j - 1 if j > remove_at else j
-                    new[str(j)] = v
-                if insert_at is not None and str(insert_at) not in new and tracks:
-                    new[str(insert_at)] = copy.deepcopy(tracks.get(str(insert_at - 1)) or next(iter(tracks.values())))
-                c["tracks"] = new
-                changed = True
-        if changed:
-            self.save_show(self.show)
 
     # ================================================================ Motor Setup wizard
     #
@@ -1168,8 +968,13 @@ class Engine:
             stroke, start = 0.6 * span, 0.2 * span
         v_now, a_now = cfg.vmax(i), cfg.amax(i)
         base_args = cfg.node_config_args(i)
+        mech = cfg.mech
         res = {"levels": [], "v_ok": None, "a_ok": None, "stopped": "", "unit": unit,
-               "v_now": round(v_now, 3), "a_now": round(a_now, 3), "running": True}
+               "v_now": round(v_now, 3), "a_now": round(a_now, 3), "running": True,
+               # what the test ran with, so a low result can be traced to a setting
+               "settings": {"run_current_pct": mech["run_current_pct"], "pd_volts": mech["pd_volts"],
+                            "driver_mode": mech.get("driver_mode", "auto"), "microsteps": mech["microsteps"]},
+               "rpm_cap": self.TEST_RPM_CAP}
         w["speed"] = res
 
         def node():
@@ -1287,6 +1092,9 @@ class Engine:
                 res["v_save"] = round(ok_v * self.SPEED_MARGIN, 1)
                 res["a_save"] = round(ok_a * self.ACCEL_MARGIN, 1)
                 res["rpm_save"] = round(res["v_save"] / upr * 60)
+                res["rpm_ok"] = round(ok_v / upr * 60)
+                # which limit this was: the motor itself, or the ceiling of the test
+                res["limit"] = "test" if res["stopped"] == "reached the test limit" else "motor"
                 self._wiz_set(msg=f"Clean up to {ok_v:.0f} {unit}/s and {ok_a:.0f} {unit}/s². "
                                   f"Suggested limits keep a margin below that.")
             except asyncio.CancelledError:
@@ -1328,7 +1136,9 @@ class Engine:
         m = self.cfg.motors[i]
         if use and r.get("v_save"):
             m["max_speed"], m["max_accel"] = r["v_save"], r["a_save"]
-            m["speed_test"] = {"v_ok": r["v_ok"], "a_ok": r["a_ok"], "at": time.strftime("%Y-%m-%d %H:%M")}
+            m["speed_test"] = {"v_ok": r["v_ok"], "a_ok": r["a_ok"], "at": time.strftime("%Y-%m-%d %H:%M"),
+                               "rpm_ok": r.get("rpm_ok"), "limit": r.get("limit"), "stopped": r.get("stopped"),
+                               "settings": r.get("settings")}
             self.cfg.save()
             self.push_config(i)
             self.event(f"M{i + 1} limits set from the speed test: {r['v_save']} {r['unit']}/s, "
@@ -1457,18 +1267,16 @@ class Engine:
                 "magnet": st.magnet_state,
                 "lim_mm": [round(st.lim_min / spm, 1), round(st.lim_max / spm, 1)] if st.has("limits") else None,
             })
-        clip_id, clip_t = None, 0.0
-        if isinstance(self.source, ClipSource):
-            clip_id, clip_t = self.source.clip_id, vnow - self.source.t0
+        src = self.source
+        move = self.move()
         bridge = None
         if self.bridge:
             bridge = {**self.bridge, "online": now - self.bridge["seen"] < 3.0}
         return {
             "type": "tick",
             "mode": self.mode, "armed": self.armed, "startup": self.startup,
-            "clip": clip_id, "clip_t": round(clip_t, 2), "entry": self.entry_index,
-            "entry_t": round(vnow - self.entry_start, 2) if self.mode == "playlist" else 0,
-            "playback": self.playback,
+            "move": move, "phase": round(src.phase % 1.0, 4) if isinstance(src, MoveSource) else None,
+            "fit": self.fit(),
             "norm": [round(v, 4) for v in self.last_norm],
             "out_mm": [round(v, 1) for v in self.out_mm],
             "desired_mm": [round(v, 1) for v in self.desired_mm],
@@ -1476,10 +1284,7 @@ class Engine:
             "actual_mm": [None if a is None else round(a, 1) for a in self.actual_mm()],
             "nodes": nodes, "bridge": bridge, "link": self.tx.connected, "port": self.tx.port_name,
             "fading": self.fade_from is not None,
-            "show": self.show.get("name"), "show_rev": self.show_rev,
-            "interrupt": None if not self.interrupt else {
-                "clip": self.interrupt["clip"], "left": round(max(0.0, self.interrupt["end"] - vnow), 1)},
-            "triggers": self.triggers.snapshot() if self.triggers else None,
+            "show_rev": self.show_rev,
             "travel": [round(self.cfg.travel(i), 1) for i in range(self.cfg.motor_count)],
             "commissioned": [bool(m.get("commissioned")) for m in self.cfg.motors],
             "setup_macs": [m.get("node_mac") for m in self.cfg.motors],
@@ -1488,6 +1293,8 @@ class Engine:
             "vmax": [round(self.cfg.vmax(i), 3) for i in range(self.cfg.motor_count)],
             "amax": [round(self.cfg.amax(i), 3) for i in range(self.cfg.motor_count)],
             "ends": [[self.cfg.kind_info(i)["home"], self.cfg.kind_info(i)["far"]] for i in range(self.cfg.motor_count)],
+            "rpm_max": [round(self.cfg.vmax(i) / self.cfg.unit_per_rev(i) * 60) for i in range(self.cfg.motor_count)],
+            "speed_test": [m.get("speed_test") for m in self.cfg.motors],
             "home_mode": self.cfg.mech["home_mode"],
             "wizard": self.wizard_snapshot(),
             "sim": bool(getattr(self.tx, "truth", None)),

@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Kinetic Operator Panel</title>
+<title>Bloom Birds Panel</title>
 <link rel="stylesheet" href="/static/panel.css">
 </head>
 <body>
 <div class="panel-app">
 
   <header class="top">
-    <div class="brand"><span class="appmark" aria-hidden="true"></span><span>Kinetic <b>Operator</b></span></div>
+    <div class="brand"><span class="appmark" aria-hidden="true"></span><span>Bloom Birds <b>Operator</b></span></div>
     <div class="lights" id="lights"></div>
     <button class="big stop" id="btnStop"><span class="sq"></span>STOP ALL</button>
     <button class="big enable" id="btnEnable" aria-pressed="false"><span class="led" id="enLed"></span><span id="enText">DISABLED</span></button>
@@ -19,8 +19,7 @@
   <nav class="side" role="tablist">
     <button class="nav active" data-view="run">Run</button>
     <button class="nav" data-view="axes">Axes</button>
-    <button class="nav" data-view="playlist">Playlist</button>
-    <button class="nav" data-view="adjust">Adjust</button>
+    <button class="nav" data-view="flap">Flap</button>
     <button class="nav" data-view="system">System</button>
   </nav>
 
@@ -40,13 +39,12 @@
           <div class="box-h">Show Control</div>
           <div class="btn-grid">
             <button class="big" data-cmd="play"><span class="gl">▶</span>Run Show</button>
-            <button class="big" data-cmd="next"><span class="gl">▶|</span>Next Clip</button>
             <button class="big" data-cmd="hold"><span class="gl">||</span>Hold</button>
             <button class="big" data-cmd="park"><span class="gl">↑</span>Park (to home)</button>
           </div>
         </div>
         <div class="box gauges">
-          <div class="box-h">Axis Positions <span class="h-note">distance from home (continuous: speed)</span></div>
+          <div class="box-h">Axis Positions <span class="h-note">distance from home · amber outline = slowed to the motor's limit</span></div>
           <canvas id="gauges" aria-label="Position of every axis"></canvas>
         </div>
       </div>
@@ -60,51 +58,9 @@
       </div>
     </section>
 
-    <!-- PLAYLIST -->
-    <section class="view" id="v-playlist">
-      <div class="box fill">
-        <div class="box-h">Playlist <span class="h-note" id="plTotal"></span></div>
-        <div class="pl-head"><span>On</span><span>#</span><span>Clip</span><span>Repeat</span><span>Order</span><span></span></div>
-        <div class="pl-rows" id="plRows"></div>
-        <p class="hint">Switched-off clips are skipped. Changes save immediately and take effect at the next clip change.</p>
-      </div>
-    </section>
-
-    <!-- ADJUST -->
-    <section class="view" id="v-adjust">
-      <div class="adjust-grid">
-        <div class="box">
-          <div class="box-h">Show Speed</div>
-          <div class="stepper big-step">
-            <button class="big" data-step="speed" data-d="-0.05" aria-label="Slower">−</button>
-            <div class="step-val" id="speedVal">100%</div>
-            <button class="big" data-step="speed" data-d="0.05" aria-label="Faster">+</button>
-          </div>
-          <div class="presets" data-preset="speed">
-            <button class="mid" data-v="0.5">50%</button><button class="mid" data-v="0.75">75%</button>
-            <button class="mid" data-v="1">100%</button><button class="mid" data-v="1.25">125%</button>
-          </div>
-          <p class="hint">Plays every clip slower or faster. Above 100% the motors may reach their speed limit and lag behind smoothly.</p>
-        </div>
-        <div class="box">
-          <div class="box-h">Depth Limit</div>
-          <div class="stepper big-step">
-            <button class="big" data-step="depth" data-d="-0.05" aria-label="Shallower">−</button>
-            <div class="step-val" id="depthVal">100%</div>
-            <button class="big" data-step="depth" data-d="0.05" aria-label="Deeper">+</button>
-          </div>
-          <div class="presets" data-preset="depth">
-            <button class="mid" data-v="0.5">50%</button><button class="mid" data-v="0.7">70%</button>
-            <button class="mid" data-v="0.85">85%</button><button class="mid" data-v="1">100%</button>
-          </div>
-          <p class="hint">Scales how far the cables drop. 100% plays the show as designed; lower keeps everything closer to the top.</p>
-        </div>
-        <div class="box">
-          <div class="box-h">Power-Up</div>
-          <div class="toggles" id="startToggles"></div>
-          <button class="mid wide" id="btnReset">Reset Speed &amp; Depth to 100%</button>
-        </div>
-      </div>
+    <!-- FLAP -->
+    <section class="view" id="v-flap">
+      <div class="adjust-grid" id="flapGrid"></div>
     </section>
 
     <!-- SYSTEM -->

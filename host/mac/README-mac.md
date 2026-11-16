@@ -23,7 +23,7 @@ It doesn't touch the rest of your Mac. To remove it, delete that folder.
 
 | Double-click | What it does |
 |---|---|
-| **Start Simulator.command** | Asks how many motors (default 5), then runs with **simulated** PD Steppers. Opens the editor and the touch panel in your browser. No hardware needed. |
+| **Start Simulator.command** | Asks how many motors (default 5), then runs with **simulated** PD Steppers. Opens the Moves screen and the touch panel in your browser. No hardware needed. |
 | **Start with Bridge.command** | Runs with the **real** ESP-NOW bridge plugged into the Mac's USB, driving real PD Steppers. |
 | **Run Tests.command** | Runs the 83 automated tests (motion math, radio protocol, simulated power-up). |
 
@@ -31,7 +31,7 @@ To stop, press **Ctrl+C** in the Terminal window, or close it. On real hardware,
 stop within 0.3 s once frames stop arriving.
 
 Both screens are at:
-- **Editor:** <http://localhost:8080>
+- **Moves screen:** <http://localhost:8080>
 - **Touch panel:** <http://localhost:8080/panel>. Make the browser window about 1280 × 720 to
   see it as it will look on the 7" display.
 
@@ -41,8 +41,8 @@ The simulator acts like real PD Steppers. They report status 5 times a second, h
 seconds, follow every motion frame, and there's one extra *unassigned* node for practicing
 assignment. You can try:
 
-- **Motion design:** build pattern and timeline clips, preview them, arrange the playlist.
-- **Operator panel:** Run/Next/Hold/Park, speed and depth adjustments, playlist on/off, jog,
+- **The flap:** set top, bottom, seconds per flap and the delay between birds.
+- **Operator panel:** Run/Hold/Park, the same four knobs on the Flap view, jog,
   set zero, identify, assign the unassigned node (including the duplicate-ID warning).
 - **Motor Setup:** the simulator includes one extra *new board*, deliberately built wrong
   (motor wired backwards, magnet flipped). Run Motor Setup on it to see the wizard catch both.
@@ -51,12 +51,11 @@ assignment. You can try:
 - **Power cuts:** closing the simulator window and starting it again is a power cut where
   every motor's power-loss save works. Motors come back *Located* at the same spot and the
   show resumes.
-  - The buttons **Sim: Power Cut** and **Sim: Power Cut, Save Fails** are under the editor's
-    Axes tab and the panel's System view.
+  - The buttons **Sim: Power Cut** and **Sim: Power Cut, Save Fails** are under the panel's
+    System view.
   - The second one shows what techs see when a motor loses its position, and how
     *Find top only* fixes it.
-- **Settings:** spool diameter, travel, speed and acceleration limits. Clips that ask for too
-  much show red rate-limit marks.
+- **Speed:** run the speed test on a simulated motor, then use *Set to fastest*.
 
 It can't test radio range, real motor torque, StallGuard tuning, or the limit-switch
 wiring. Those need the bench.

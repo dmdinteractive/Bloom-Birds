@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Start the kinetic sculpture controller.
+"""Start the Bloom Birds controller.
 
     python3 run.py                 # real hardware (bridge on USB)
     python3 run.py --simulate      # no hardware: simulated motors
-    python3 run.py --port 8080     # web editor port (default 8080)
+    python3 run.py --port 8080     # web port (default 8080)
 
 Testing on a Mac (see mac/README-mac.md, or just double-click mac/Start Simulator.command):
 
@@ -25,7 +25,6 @@ from aiohttp import web
 from kinetic.config import Config, relayout_motors
 from kinetic.engine import Engine
 from kinetic.server import create_app
-from kinetic.triggers import TriggerManager
 from kinetic.transport import SerialTransport, SimTransport
 
 HERE = Path(__file__).resolve().parent
@@ -42,7 +41,7 @@ async def main():
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--local", action="store_true",
                     help="only reachable from this computer (no firewall prompt on a Mac)")
-    ap.add_argument("--open", action="store_true", help="open the editor and panel in the browser")
+    ap.add_argument("--open", action="store_true", help="open the Moves screen and panel in the browser")
     ap.add_argument("--no-autostart", action="store_true", help="don't home/play at startup")
     args = ap.parse_args()
 
@@ -90,7 +89,7 @@ async def main():
         raise SystemExit(f"\nPort {args.port} is already in use ({e.strerror}). Is the controller "
                          f"already running in another window? Close it, or start with --port {args.port + 1}.\n")
     url = f"http://localhost:{args.port}"
-    logging.info("Editor running at %s  (%s, %d axes)", url,
+    logging.info("Moves screen at %s  (%s, %d axes)", url,
                  "SIMULATION" if simulate else "hardware", cfg.motor_count)
     logging.info("Touch panel at   %s/panel", url)
     if args.open:
@@ -107,9 +106,6 @@ async def main():
                 loop.add_signal_handler(sig, stop.set)
             except (NotImplementedError, RuntimeError):
                 pass
-    # external triggers (OSC, MIDI, Art-Net, GPIO): only the inputs switched on in the editor start
-    engine.triggers = TriggerManager(engine)
-    await engine.triggers.start()
     runner_task = asyncio.create_task(engine.run())
     if not args.no_autostart:
         asyncio.create_task(engine.autostart())
@@ -117,7 +113,6 @@ async def main():
         await asyncio.wait([runner_task, asyncio.create_task(stop.wait())], return_when=asyncio.FIRST_COMPLETED)
     finally:
         logging.info("Shutting down")
-        engine.triggers.stop()
         transport.stop()
         await runner.cleanup()
 

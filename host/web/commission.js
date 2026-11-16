@@ -134,7 +134,7 @@ const KIND_BLURB = {
   spool: "Winds a cable in and out to raise and lower a hanging piece. Units: mm of cable.",
   linear: "A lead screw or belt moving a carriage along a straight line. Units: mm.",
   rotary: "Turns an arm, wing or crank between two angles. Units: degrees.",
-  continuous: "Spins without limits (wheels, propellers, cams). The motion design sets its speed. Units: rev/s.",
+  continuous: "Spins without limits (wheels, propellers, cams). The show sets its speed. Units: rev/s.",
 };
 function mechHtml(w) {
   if (!C.mech || C.mech.motor !== w.motor) C.mech = { motor: w.motor, kind: w.kind, size: w.size, bidir: !!w.bidirectional };
@@ -178,8 +178,15 @@ function speedHtml(w) {
       <button class="mid" data-act="speed_run">Run again</button>`;
   else actions = `<button class="big primary" data-act="speed_run">Run speed test</button>
       ${w.speed_only ? "" : `<button class="mid" data-act="skip_speed">Skip</button>`}`;
-  const result = r && r.v_save && !busy ? `<div class="msg">Ran clean up to <b>${fmtLim(r.v_ok)} ${esc(u)}/s</b> (≈${Math.round(r.rpm_save / 0.7)} RPM) and
-    <b>${fmtLim(r.a_ok)} ${esc(u)}/s²</b>${r.stopped ? `; stopped because: ${esc(r.stopped)}` : ""}. Current limits: ${fmtLim(r.v_now)} ${esc(u)}/s, ${fmtLim(r.a_now)} ${esc(u)}/s².</div>` : "";
+  const set = r?.settings;
+  const why = !r ? "" : r.limit === "test"
+    ? `It never slipped: the test stops at ${r.rpm_cap} RPM, so the motor has more in hand than the test will try.`
+    : `<b>The motor is the limit</b> (${esc(r.stopped || "missed steps")}). To go faster, change the hardware settings and run the test again.`;
+  const ranWith = set ? `Tested at ${set.run_current_pct}% run current, ${set.pd_volts} V supply, driver mode "${esc(set.driver_mode)}".
+    ${r.limit === "motor" && (set.run_current_pct < 100 || set.pd_volts < 20 || set.driver_mode === "stealth")
+      ? "More run current, a 20 V supply and the spread or auto driver mode each give more torque at speed (Moves screen → Settings)." : ""}` : "";
+  const result = r && r.v_save && !busy ? `<div class="msg">Ran clean up to <b>${fmtLim(r.v_ok)} ${esc(u)}/s</b> (${r.rpm_ok ?? Math.round(r.rpm_save / 0.7)} RPM at the motor) and
+    <b>${fmtLim(r.a_ok)} ${esc(u)}/s²</b>. ${why}<br>${ranWith}<br>Current limits: ${fmtLim(r.v_now)} ${esc(u)}/s, ${fmtLim(r.a_now)} ${esc(u)}/s².</div>` : "";
   return intro + result + msgBox(w) + rows + `<div class="spacer"></div><div class="step-actions sticky">${actions}</div>`;
 }
 
@@ -316,7 +323,7 @@ function chooseHtml() {
 function doneHtml() {
   const f = C.finished;
   return `<div class="step-title">${esc(mname(f.motor))} ${f.speedOnly ? "speed test done" : "is set up"}</div>
-    <div class="step-text">${f.speedOnly ? "Its speed and acceleration limits are saved. Motion designs now show the fastest cycle it can do." : f.recover ? "The top was re-found. The motor knows its position again." :
+    <div class="step-text">${f.speedOnly ? "Its speed and acceleration limits are saved. The Flap screen now shows the fastest flap it can do." : f.recover ? "The top was re-found. The motor knows its position again." :
       `Travel ${mm(C.tick?.travel?.[f.motor], 0)} mm. The motor remembers its position from now on.`}
       The show is stopped. Press <b>ENABLE</b> on the panel or editor when you are ready to run it.</div>
     <div class="step-actions"><button class="big primary" data-act="another">Set up another motor</button>

@@ -10,7 +10,7 @@ ls /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.wchusbserial* /dev/cu.SLAB_USBto
 echo
 echo "Starting with hardware. Motors will home and the show will play automatically"
 echo "unless that is switched off under Setup > Startup."
-echo "  Editor:      http://localhost:8080"
+echo "  Moves:       http://localhost:8080"
 echo "  Touch panel: http://localhost:8080/panel"
 echo "Press Ctrl+C or close this window to stop (motors stop within 0.3 s)."
 echo

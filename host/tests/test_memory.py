@@ -57,7 +57,7 @@ def test_simulated_motors_start_set_up_and_play(rig):
         runner = await run_show(eng, 3)
         runner.cancel()
     asyncio.run(go())
-    assert eng.armed and eng.mode == "playlist"
+    assert eng.armed and eng.mode == "play"
     for i in range(cfg.motor_count):
         st = eng.node_by_id(i)["status"]
         assert st.has("homed") and st.has("restored") and st.has("calibrated") and st.has("limits")
@@ -335,9 +335,6 @@ def test_new_install_starts_with_one_motor(tmp_path):
 def test_remove_middle_motor_renumbers_boards_and_data(rig):
     cfg, tx, eng = rig
     cfg.motors[2].update({"commissioned": True, "bottom_fs": 2222.0, "node_mac": "5E:00:00:00:00:02"})
-    pose = {"id": "pz", "name": "pose", "type": "pattern", "pattern": "pose", "duration": 5, "fade": 0,
-            "params": {"values": [0.0, 0.1, 0.2, 0.3]}}
-    eng.save_show({**eng.show, "clips": eng.show["clips"] + [pose]})
     _run(eng, 0.6)
     eng.remove_motors([1])
     _run(eng, 0.6)
@@ -348,7 +345,6 @@ def test_remove_middle_motor_renumbers_boards_and_data(rig):
     assert cfg.motors[1]["bottom_fs"] == 2222.0
     assert next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:01").id == P.ID_UNASSIGNED
     assert next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:03").id == 2
-    assert eng.clip("pz")["params"]["values"] == [0.0, 0.2, 0.3]
 
 
 def test_cannot_remove_the_last_motor(rig):
@@ -408,16 +404,13 @@ def test_rotary_motor_moves_in_degrees(rig):
     assert abs(spu - 3200 / 72) < 1e-6                             # 72 output degrees per motor turn
     cfg.motors[0]["travel_mm"] = 180.0                             # 0..180 degrees
     eng.send_cmd(P.C_SET_LIMITS, 0, args=[0, 0, 0])
-    pose = {"id": "rz", "name": "pose", "type": "pattern", "pattern": "pose", "duration": 30, "fade": 0,
-            "params": {"values": [0.5] * cfg.motor_count}}
-    eng.save_show({**eng.show, "clips": eng.show["clips"] + [pose]})
     eng.push_config(0)
 
     async def go():
         t = asyncio.create_task(eng.run())
         await asyncio.sleep(0.6)
         eng.arm(True)
-        eng.solo("rz")
+        eng.hold_at([0.5] * cfg.motor_count)
         await asyncio.sleep(9)
         t.cancel()
     asyncio.run(go())
@@ -430,9 +423,6 @@ def test_continuous_motor_runs_at_speed_and_respects_limits(rig):
     cfg.motors[1].update({"kind": "continuous", "size": 1.0, "max_speed": 1.0, "max_accel": 2.0})
     eng.send_cmd(P.C_SET_LIMITS, 0, args=[0, 0, 0])               # M1: set up as continuous (no limits)
     # M2's board still has taught limits -> it must refuse to free-run
-    pose = {"id": "cz", "name": "spin", "type": "pattern", "pattern": "pose", "duration": 30, "fade": 0,
-            "params": {"values": [0.5] * cfg.motor_count}}
-    eng.save_show({**eng.show, "clips": eng.show["clips"] + [pose]})
     eng.push_config(0)
     eng.push_config(1)
     samples = []
@@ -441,7 +431,7 @@ def test_continuous_motor_runs_at_speed_and_respects_limits(rig):
         t = asyncio.create_task(eng.run())
         await asyncio.sleep(0.6)
         eng.arm(True)
-        eng.solo("cz")
+        eng.hold_at([0.5] * cfg.motor_count)
         await asyncio.sleep(4)
         s0, m2a = node(tx, 0).steps, node(tx, 1).steps
         await asyncio.sleep(2)
@@ -494,16 +484,6 @@ def test_wizard_for_continuous_motor_skips_limits(rig):
     assert "bottom_fs" not in m and not fresh.limits_on()
 
 
-def test_groups_follow_renumbering(rig):
-    cfg, tx, eng = rig
-    cfg.data["groups"] = [{"name": "left", "motors": [0, 1]}, {"name": "right", "motors": [2, 3]}]
-    _run(eng, 0.6)
-    eng.remove_motors([1])
-    assert cfg.data["groups"] == [{"name": "left", "motors": [0]}, {"name": "right", "motors": [1, 2]}]
-    assert eng.eval_ctx()["groups"] == {"left": [0], "right": [1, 2]}
-
-
-# ---------------------------------------------------------------- the speed test
 def test_speed_test_finds_limits_below_the_stall_and_keeps_position(rig):
     """The simulated motors stall above 600 RPM / 40 rev/s² (like a real stepper with a load).
     The speed test must stop below that, suggest limits with a margin, and leave the motor's
