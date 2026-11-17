@@ -50,7 +50,7 @@ function modal(msg, buttons) {
 // ------------------------------------------------------------ connection
 async function loadConfig() {
   const st = await api("GET", "/api/state");
-  C.config = st.config; C.kinds = st.kinds; C.sizePresets = st.size_presets;
+  C.config = st.config; C.sizePresets = st.size_presets;
 }
 function connectWs() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
@@ -65,12 +65,11 @@ function connectWs() {
 }
 
 // ------------------------------------------------------------ steps
-// The step list comes from the controller (it depends on the mechanism: continuous rotation has
-// no ends to teach). Labels use each mechanism's own words: top/bottom, home/far end, start/end angle.
+// The step list comes from the controller (a full setup, find-the-top only, or speed test only).
 const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : t);
 function stepLabel(k, w) {
   if (k === "choose") return "Choose motor";
-  if (k === "mechanism") return "Mechanism";
+  if (k === "spool") return "Spool";
   if (k === "direction") return "Direction";
   if (k === "encoder") return "Encoder";
   if (k === "top") return (w?.recover ? "Find " : "Teach ") + (w?.home || "top");
@@ -80,14 +79,14 @@ function stepLabel(k, w) {
   return "Save";
 }
 function stepsFor(w) {
-  const keys = ["choose", ...(w?.steps || ["mechanism", "direction", "encoder", "top", "bottom", "test", "finish"])];
+  const keys = ["choose", ...(w?.steps || ["spool", "direction", "encoder", "top", "bottom", "test", "finish"])];
   return keys.map((k) => [k, stepLabel(k, w)]);
 }
 
 function renderSteps(w) {
   const list = stepsFor(w), cur = w ? w.step : "choose";
   const idx = list.findIndex(([k]) => k === cur);
-  const canGo = (k, i) => w && !w.busy && i < idx && i > 0 && ["mechanism", "direction", "encoder", "top", "bottom"].includes(k);
+  const canGo = (k, i) => w && !w.busy && i < idx && i > 0 && ["spool", "direction", "encoder", "top", "bottom"].includes(k);
   $("#steps").innerHTML = list.map(([k, label], i) =>
     `<button class="step ${i < idx ? "done" : ""} ${i === idx ? "current" : ""} ${canGo(k, i) ? "can-go" : ""}" data-goto="${canGo(k, i) ? k : ""}">
       <span class="num">${i < idx ? "✓" : i + 1}</span><span>${esc(label)}</span></button>`).join("") +
@@ -98,15 +97,9 @@ $("#steps").addEventListener("click", (ev) => {
   send("wiz_goto", { step: b.dataset.goto });
 });
 
-// jog pad: negative = toward home, positive = toward the far end, in the motor's units
-const JOG_WORDS = {
-  spool: ["Up (wind in)", "Down (pay out)", "Up", "Down"],
-  linear: ["Toward home", "Toward far end", "Back", "Out"],
-  rotary: ["Toward start angle", "Toward end angle", "Back", "Turn"],
-  continuous: ["Backward", "Forward", "Back", "Fwd"],
-};
+// jog pad: negative = up (wind in), positive = down (pay out), in mm of cable
 function jogHtml(w) {
-  const [hA, hB, a, b] = JOG_WORDS[w.kind] || JOG_WORDS.spool;
+  const [hA, hB, a, b] = ["Up (wind in)", "Down (pay out)", "Up", "Down"];
   const st = w.jog_steps || [50, 10, 1], u = w.unit || "mm";
   const glyph = ["▲▲", "▲", "△"], glyphB = ["▼▼", "▼", "▽"];
   return `<div class="jog">
@@ -124,38 +117,19 @@ function msgBox(w) {
   return `<div class="msg ${w.busy ? "busy" : ""}">${esc(w.msg)}</div>`;
 }
 
-// mechanism step: choices are local until "Continue"
-const HOME_HINT = {
-  spool: ["its highest safe position, where it should stop when fully wound in", "its lowest safe position"],
-  linear: ["the end of travel you want as home (0)", "the other end of its safe travel"],
-  rotary: ["the start of its swing (0°)", "the end of its swing"],
-};
-const KIND_BLURB = {
-  spool: "Winds a cable in and out to raise and lower a hanging piece. Units: mm of cable.",
-  linear: "A lead screw or belt moving a carriage along a straight line. Units: mm.",
-  rotary: "Turns an arm, wing or crank between two angles. Units: degrees.",
-  continuous: "Spins without limits (wheels, propellers, cams). The show sets its speed. Units: rev/s.",
-};
+// spool step: the diameter is local until "Continue"
+const HOME_HINT = ["its highest safe position, where it should stop when fully wound in", "its lowest safe position"];
 function mechHtml(w) {
-  if (!C.mech || C.mech.motor !== w.motor) C.mech = { motor: w.motor, kind: w.kind, size: w.size, bidir: !!w.bidirectional };
-  const kinds = C.kinds || {};
-  const k = C.mech.kind, info = kinds[k] || {};
-  const presets = (C.sizePresets || {})[k] || [];
-  const fine = k === "spool" || k === "linear" ? 0.5 : 0.1;
-  return `<div class="step-title">${esc(mname(w.motor))}: Mechanism</div>
-    <div class="step-text">What does this motor drive? This sets its units, its limits and the wording on the next steps.</div>
-    <div class="kind-grid">${Object.entries(kinds).map(([key, ki]) =>
-      `<button class="pick ${key === k ? "sel" : ""}" data-kind="${key}"><span class="p-name">${esc(ki.label)}</span>
-        <span class="p-state">${esc(KIND_BLURB[key] || "")}</span></button>`).join("")}</div>
-    <div class="sec-row"><span class="section-h">${esc(info.size_label || "Size")}</span>
-      <div class="stepper"><button class="mid" data-size="${-fine}">−</button>
-        <div class="step-val">${Number(C.mech.size).toFixed(fine < 0.5 ? 1 : 1)} ${esc(info.size_unit || "")}</div>
-        <button class="mid" data-size="${fine}">+</button></div></div>
-    <div class="chips">${presets.map((v) => `<button class="mid chip ${Number(C.mech.size) === v ? "sel" : ""}" data-preset="${v}">${v}${esc(info.size_unit || "")}</button>`).join("")}</div>
-    ${k === "continuous" ? `<div class="sec-row"><span class="section-h">Directions</span>
-      <div class="seg"><button class="mid ${!C.mech.bidir ? "sel" : ""}" data-bidir="0">Forward only</button>
-      <button class="mid ${C.mech.bidir ? "sel" : ""}" data-bidir="1">Both directions</button></div></div>
-      <div class="hint">${C.mech.bidir ? "Design values: 0 = full reverse, 0.5 = stopped, 1 = full forward." : "Design values: 0 = stopped, 1 = full speed forward."}</div>` : ""}
+  if (!C.mech || C.mech.motor !== w.motor) C.mech = { motor: w.motor, size: w.size };
+  const presets = C.sizePresets || [];
+  return `<div class="step-title">${esc(mname(w.motor))}: Spool</div>
+    <div class="step-text">Set the spool's diameter where the cable wraps (measure it with cable on it). The controller uses it to turn
+      motor turns into millimetres of cable.</div>
+    <div class="sec-row"><span class="section-h">Spool diameter</span>
+      <div class="stepper"><button class="mid" data-size="-0.5">−</button>
+        <div class="step-val">${Number(C.mech.size).toFixed(1)} mm</div>
+        <button class="mid" data-size="0.5">+</button></div></div>
+    <div class="chips">${presets.map((v) => `<button class="mid chip ${Number(C.mech.size) === v ? "sel" : ""}" data-preset="${v}">${v} mm</button>`).join("")}</div>
     ${msgBox(w)}
     <div class="spacer"></div>
     <div class="step-actions sticky"><button class="big go" data-act="mech_ok" ${w.busy ? "disabled" : ""}>Continue</button></div>`;
@@ -166,7 +140,7 @@ const fmtLim = (v, dflt) => { const x = v ?? dflt; return x == null ? "default" 
 function speedHtml(w) {
   const r = w.speed, u = w.unit || "mm", busy = w.busy;
   const intro = `<div class="step-text">Finds how fast ${esc(mname(w.motor))} can move <b>with its real load attached</b>.
-    It runs back and forth over the middle of its travel${w.kind === "continuous" ? " (10 turns at a time)" : ""}, faster each time,
+    It runs back and forth over the middle of its travel, faster each time,
     until the encoder shows the motor slipped. Then it tries harder starts and stops. It suggests limits about 30–40% below what ran clean.
     <br><b>Keep people and hands clear: it will move fast.</b> A slipped run makes a buzzing or clunk; that is expected and harmless.</div>`;
   const rows = r?.levels?.length ? `<table class="summary speed-table"><tr><th>Run</th><th>Speed</th><th>Accel</th><th>Result</th></tr>${r.levels.map((l, k) =>
@@ -182,9 +156,9 @@ function speedHtml(w) {
   const why = !r ? "" : r.limit === "test"
     ? `It never slipped: the test stops at ${r.rpm_cap} RPM, so the motor has more in hand than the test will try.`
     : `<b>The motor is the limit</b> (${esc(r.stopped || "missed steps")}). To go faster, change the hardware settings and run the test again.`;
-  const ranWith = set ? `Tested at ${set.run_current_pct}% run current, ${set.pd_volts} V supply, driver mode "${esc(set.driver_mode)}".
-    ${r.limit === "motor" && (set.run_current_pct < 100 || set.pd_volts < 20 || set.driver_mode === "stealth")
-      ? "More run current, a 20 V supply and the spread or auto driver mode each give more torque at speed (Moves screen → Settings)." : ""}` : "";
+  const ranWith = set ? `Tested at ${set.run_current_pct}% motor current and ${set.pd_volts} V.
+    ${r.limit === "motor" && set.run_current_pct < 100
+      ? "More motor current gives more torque at speed (Moves screen → Settings), at the cost of heat." : ""}` : "";
   const result = r && r.v_save && !busy ? `<div class="msg">Ran clean up to <b>${fmtLim(r.v_ok)} ${esc(u)}/s</b> (${r.rpm_ok ?? Math.round(r.rpm_save / 0.7)} RPM at the motor) and
     <b>${fmtLim(r.a_ok)} ${esc(u)}/s²</b>. ${why}<br>${ranWith}<br>Current limits: ${fmtLim(r.v_now)} ${esc(u)}/s, ${fmtLim(r.a_now)} ${esc(u)}/s².</div>` : "";
   return intro + result + msgBox(w) + rows + `<div class="spacer"></div><div class="step-actions sticky">${actions}</div>`;
@@ -195,9 +169,9 @@ function stepHtml(w) {
   const moving = n.moving || w?.busy;
   if (!w) return C.finished ? doneHtml() : chooseHtml();
   const title = (t) => `<div class="step-title">${esc(mname(w.motor))}: ${esc(t)}</div>`;
-  const u = w.unit || "mm", d = w.test_step || 10, [homeHint, farHint] = HOME_HINT[w.kind] || HOME_HINT.spool;
+  const u = w.unit || "mm", d = w.test_step || 10, [homeHint, farHint] = HOME_HINT;
   switch (w.step) {
-    case "mechanism":
+    case "spool":
       return mechHtml(w);
     case "direction":
       return title("Direction") + `
@@ -235,29 +209,25 @@ function stepHtml(w) {
           <span class="hint">${tooClose ? `Go at least ${2 * d} ${esc(u)} from the ${esc(w.home)}.` : ""}</span></div>`;
     }
     case "test":
-      return title("Test") + (w.kind === "continuous" ? `
-        <div class="step-text">The motor turns forward for 3 seconds at a quarter of its top speed, then back the same amount.</div>` : `
+      return title("Test") + `
         <div class="step-text">The motor now moves slowly to the <b>middle</b>, the <b>${esc(w.far)}</b> (${mm(w.bottom_mm, 0)} ${esc(u)})
-          and back to the <b>${esc(w.home)}</b>, staying inside the limits you taught. Watch that it stops at the right places.</div>`) + `
+          and back to the <b>${esc(w.home)}</b>, staying inside the limits you taught. Watch that it stops at the right places.</div>
         ${msgBox(w)}
-        <div class="step-actions"><button class="big primary" data-act="test" ${moving ? "disabled" : ""}>${w.kind === "continuous" ? "Run spin test" : "Run test moves"}</button>
+        <div class="step-actions"><button class="big primary" data-act="test" ${moving ? "disabled" : ""}>Run test moves</button>
           <button class="mid" data-act="skip_test" ${moving ? "disabled" : ""}>Skip</button></div>`;
     case "speed":
       return title("Speed test") + speedHtml(w);
     case "finish": {
-      const m = C.config.motors[w.motor] || {}, kinfo = (C.kinds || {})[w.kind] || {};
+      const m = C.config.motors[w.motor] || {};
       const rows = w.recover
         ? [["Motor", mname(w.motor)], ["Board", w.mac], [cap(w.home), "re-taught"], [cap(w.far), `kept (${mm(C.tick?.travel?.[w.motor], 0)} ${u})`]]
-        : [["Motor", mname(w.motor)], ["Board", w.mac], ["Mechanism", kinfo.label || w.kind],
-           [kinfo.size_label || "Size", `${w.size} ${kinfo.size_unit || ""}`],
+        : [["Motor", mname(w.motor)], ["Board", w.mac], ["Spool diameter", `${w.size} mm`],
            ["Motor direction", m.invert_dir ? "reversed" : "normal"], ["Encoder direction", m.invert_encoder ? "reversed" : "normal"],
-           ...(w.kind === "continuous" ? [["Directions", w.bidirectional ? "both" : "forward only"]]
-             : [[`Travel (${w.home} to ${w.far})`, `${mm(w.bottom_mm, 0)} ${u}`]]),
+           [`Travel (${w.home} to ${w.far})`, `${mm(w.bottom_mm, 0)} ${u}`],
            ["Test", w.test_done ? "done" : "skipped"],
            ["Speed limit", `${fmtLim(C.tick?.vmax?.[w.motor])} ${u}/s, ${fmtLim(C.tick?.amax?.[w.motor])} ${u}/s²${w.speed?.v_save ? " (speed test)" : ""}`]];
       return title("Save") + `
-        <div class="step-text">Check the summary and save. ${w.kind === "continuous" ? "The show will drive this motor's speed." :
-          "The motor will remember its position from now on, including across power cuts, and the show can use it."}</div>
+        <div class="step-text">Check the summary and save. The motor will remember its position from now on, including across power cuts, and the show can use it.</div>
         <table class="summary">${rows.map(([a, b]) => `<tr><td>${esc(a)}</td><td>${esc(b)}</td></tr>`).join("")}</table>
         ${msgBox(w)}
         <div class="step-actions"><button class="big go" data-act="finish" ${moving ? "disabled" : ""}>Save setup</button></div>`;
@@ -291,7 +261,7 @@ function chooseHtml() {
   const comm = C.tick?.commissioned || [];
   const lost = sel && C.selMotor === sel.id && nodeState(sel)[0] === "bad";
   const ends = (C.selMotor !== null && C.tick?.ends?.[C.selMotor]) || ["top", "bottom"];
-  const canRecover = C.tick?.kinds?.[C.selMotor] !== "continuous" && !isNew && (sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost);
+  const canRecover = !isNew && (sel && C.selMotor !== null && comm[C.selMotor] && sel.flags.includes("calibrated") || lost);
   const canSpeed = !isNew && sel && C.selMotor !== null && sel.id === C.selMotor && comm[C.selMotor] && nodeState(sel)[0] === "on";
   return `
     <div class="step-title">Choose the motor to set up</div>
@@ -340,19 +310,10 @@ $("#stepBox").addEventListener("click", async (ev) => {
   }
   const slot = ev.target.closest("[data-slot]");
   if (slot) { C.selMotor = +slot.dataset.slot; C.key = ""; render(); return; }
-  const kindB = ev.target.closest("[data-kind]");
-  if (kindB && C.mech) {
-    C.mech.kind = kindB.dataset.kind;
-    C.mech.size = (C.kinds?.[C.mech.kind] || {}).size_default ?? 1;
-    if (C.mech.kind === "spool") C.mech.size = C.config.mechanics.spool_diameter_mm;
-    C.key = ""; render(); return;
-  }
   const sz = ev.target.closest("[data-size]");
-  if (sz && C.mech) { C.mech.size = Math.max(0.1, Math.round((Number(C.mech.size) + Number(sz.dataset.size)) * 10) / 10); C.key = ""; render(); return; }
+  if (sz && C.mech) { C.mech.size = Math.max(5, Math.round((Number(C.mech.size) + Number(sz.dataset.size)) * 10) / 10); C.key = ""; render(); return; }
   const pr = ev.target.closest("[data-preset]");
   if (pr && C.mech) { C.mech.size = Number(pr.dataset.preset); C.key = ""; render(); return; }
-  const bd = ev.target.closest("[data-bidir]");
-  if (bd && C.mech) { C.mech.bidir = bd.dataset.bidir === "1"; C.key = ""; render(); return; }
   const jog = ev.target.closest("[data-jog]");
   if (jog) { send("wiz_jog", { mm: +jog.dataset.jog }); return; }
   const b = ev.target.closest("[data-act]"); if (!b || b.disabled) return;
@@ -378,7 +339,7 @@ $("#stepBox").addEventListener("click", async (ev) => {
   else if (a === "dir_test") send("wiz_dir_test");
   else if (a === "lowered") send("wiz_dir_answer", { correct: true });
   else if (a === "raised") send("wiz_dir_answer", { correct: false });
-  else if (a === "mech_ok") send("wiz_mech", { kind: C.mech.kind, size: C.mech.size, bidirectional: C.mech.bidir });
+  else if (a === "mech_ok") send("wiz_mech", { size: C.mech.size });
   else if (a === "encoder") send("wiz_encoder");
   else if (a === "top") send("wiz_top");
   else if (a === "bottom") send("wiz_bottom");
@@ -407,14 +368,13 @@ function renderReadout(w) {
   if (!w) {
     ro.innerHTML = `<div class="ro-label">Motor Setup</div>
       <div class="step-text" style="font-size:14px">Run this for every new or replaced PD Stepper. It sets the motor direction, checks the
-        encoder, and teaches the two ends of its travel (top and bottom, home and far end, or start and end angle).
-        Without home switches, the motors use the taught home and the encoder to know where they are after a power cut.
-        Continuous-rotation motors skip the ends: the show drives their speed.</div>`;
+        encoder, and teaches the top and bottom of its travel.
+        Without home switches, the motors use the taught top and the encoder to know where they are after a power cut.</div>`;
     return;
   }
   const n = w.node || {};
   const bottom = w.bottom_mm ?? (w.recover ? C.tick?.travel?.[w.motor] : null);
-  const u = w.unit || "mm", home = w.home || "top", far = w.far || "bottom", cont = w.kind === "continuous";
+  const u = w.unit || "mm", home = w.home || "top", far = w.far || "bottom", cont = false;
   ro.innerHTML = `
     <div><div class="ro-name">${esc(mname(w.motor))}</div><div class="ro-mac">${esc(w.mac)}</div></div>
     <div><div class="ro-label">${n.homed && !cont ? `From the ${esc(home)}` : "Position"}</div>

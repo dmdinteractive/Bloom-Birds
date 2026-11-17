@@ -53,7 +53,6 @@ grep -q "kinetic-kiosk.sh" "$AUTOSTART" || echo "$BIN/kinetic-kiosk.sh &" >> "$A
 echo
 echo "Kiosk installed. Reboot to start:  sudo reboot"
 echo
-echo "Screen orientation: the Touch Display 2 is a portrait panel. For the landscape operator"
-echo "panel, open Control Centre > Screens on the desktop, right-click the DSI display,"
-echo "choose Orientation (Left or Right, depending on how it is mounted), then Apply."
-echo "Check that touches land where you tap after rotating."
+echo "Screen orientation: the Touch Display 2 is a portrait panel. The panel page turns itself to"
+echo "landscape automatically. If it comes up upside down for the way the screen is mounted, press"
+echo "Service > Flip screen upside down. Leave the desktop's own screen orientation at its default."

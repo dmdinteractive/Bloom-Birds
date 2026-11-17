@@ -1,6 +1,6 @@
 /* Motor Setup wizard. Builds on panel.css (same palette, buttons, LEDs). 1280×720 touch first,
  * and it reflows for a laptop window. */
-.setup-app { height: 100vh; display: grid; grid-template-columns: 210px 1fr 300px; grid-template-rows: 64px 1fr 30px; }
+.setup-app { height: 100%; display: grid; grid-template-columns: 210px 1fr 300px; grid-template-rows: 64px 1fr 30px; }
 .setup-app .top { grid-column: 1 / -1; }
 #btnExit { min-width: 130px; }
 
@@ -97,7 +97,7 @@
   .readout { grid-column: 1 / -1; margin: 0 10px 10px; flex-direction: row; flex-wrap: wrap; }
   #gauge { display: none; }
 }
-@media (min-height: 800px) { .setup-app { height: 100vh; } }
+@media (min-height: 800px) { .setup-app { height: 100%; } }
 
 /* mechanism step */
 .kind-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }

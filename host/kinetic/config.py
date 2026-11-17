@@ -28,23 +28,12 @@ def write_atomic(path: Path, text: str):
 
 HOME_MODES = {"manual": 0, "limit": 1, "stallguard": 2, "memory": 3}
 
-# Mechanism types. Every motor has one (motors[i]["kind"], default "spool"). The motion design
-# works in 0..1 for every type ("home" .. "far" limit); each motor converts that into its own
-# units. For continuous rotation, the 0..1 value is a SPEED instead of a position.
-#   size: what one motor revolution means -- spool diameter, screw lead, or gear ratio
+# Every motor drives a cable spool. These are the words and defaults the screens use for it.
+# (The key "spool" is kept so screens and saved configs keep one shape.)
 KINDS = {
     "spool": {"label": "Cable spool", "unit": "mm", "size_label": "Spool diameter", "size_unit": "mm",
               "size_default": 40.0, "home": "top", "far": "bottom", "positive": "lower (cable pays out)",
               "vmax": 150.0, "amax": 300.0, "travel": 1000.0},
-    "linear": {"label": "Linear actuator", "unit": "mm", "size_label": "Lead (travel per motor turn)", "size_unit": "mm",
-               "size_default": 8.0, "home": "home end", "far": "far end", "positive": "move away from the home end",
-               "vmax": 40.0, "amax": 150.0, "travel": 300.0},
-    "rotary": {"label": "Rotary (angle)", "unit": "°", "size_label": "Gear ratio (motor turns per output turn)",
-               "size_unit": ":1", "size_default": 1.0, "home": "start angle", "far": "end angle",
-               "positive": "turn toward the end of its swing", "vmax": 180.0, "amax": 720.0, "travel": 180.0},
-    "continuous": {"label": "Continuous rotation", "unit": "rev/s", "size_label": "Gear ratio (motor turns per output turn)",
-                   "size_unit": ":1", "size_default": 1.0, "home": "", "far": "", "positive": "turn forward",
-                   "vmax": 1.0, "amax": 2.0, "travel": 0.0},
 }
 
 DEFAULT_CONFIG = {
@@ -183,38 +172,24 @@ class Config:
         m = self.mech
         return m["full_steps_per_rev"] * m["microsteps"] / (math.pi * m["spool_diameter_mm"])
 
-    # ---------- per-motor mechanism ----------
+    # ---------- per-motor spool ----------
     def kind(self, i: int) -> str:
-        k = self.motors[i].get("kind") if 0 <= i < self.motor_count else None
-        return k if k in KINDS else "spool"
+        return "spool"
 
     def kind_info(self, i: int) -> dict:
-        return KINDS[self.kind(i)]
+        return KINDS["spool"]
 
     def unit(self, i: int) -> str:
-        return self.kind_info(i)["unit"]
-
-    def is_continuous(self, i: int) -> bool:
-        return self.kind(i) == "continuous"
+        return "mm"
 
     def size(self, i: int) -> float:
+        """Spool diameter in mm: this motor's own if it was set in Motor Setup, else the default."""
         v = self.motors[i].get("size")
-        if v:
-            return float(v)
-        if self.kind(i) == "spool":
-            return float(self.mech["spool_diameter_mm"])
-        return float(self.kind_info(i)["size_default"])
+        return float(v) if v else float(self.mech["spool_diameter_mm"])
 
     def unit_per_rev(self, i: int) -> float:
-        """Output units for one motor revolution."""
-        k, s = self.kind(i), max(1e-6, self.size(i))
-        if k == "spool":
-            return math.pi * s
-        if k == "linear":
-            return s
-        if k == "rotary":
-            return 360.0 / s
-        return 1.0 / s                      # continuous: output revolutions
+        """Millimetres of cable for one motor revolution."""
+        return math.pi * max(1e-6, self.size(i))
 
     def spu(self, i: int) -> float:
         """Microsteps per unit for motor i."""
@@ -222,42 +197,22 @@ class Config:
 
     def vmax(self, i: int) -> float:
         v = self.motors[i].get("max_speed")
-        if v:
-            return float(v)
-        return float(self.mech["max_speed_mm_s"]) if self.kind(i) == "spool" else self.kind_info(i)["vmax"]
+        return float(v) if v else float(self.mech["max_speed_mm_s"])
 
     def amax(self, i: int) -> float:
         v = self.motors[i].get("max_accel")
-        if v:
-            return float(v)
-        return float(self.mech["max_accel_mm_s2"]) if self.kind(i) == "spool" else self.kind_info(i)["amax"]
+        return float(v) if v else float(self.mech["max_accel_mm_s2"])
 
     def jog_speed(self, i: int) -> float:
-        if self.kind(i) == "spool":
-            return float(self.mech["home_speed_mm_s"]) * 2
-        return self.vmax(i) / 4
-
-    def bidirectional(self, i: int) -> bool:
-        return bool(self.motors[i].get("bidirectional"))
-
-    def speed_from_norm(self, i: int, v: float) -> float:
-        """Continuous motors: the 0..1 design value is a speed. Forward-only: 0..max.
-        Both directions: 0 = full reverse, 0.5 = stopped, 1 = full forward."""
-        v = min(1.0, max(0.0, v))
-        return ((2 * v - 1) if self.bidirectional(i) else v) * self.vmax(i)
+        return float(self.mech["home_speed_mm_s"]) * 2
 
     def travel(self, i: int) -> float:
-        """Distance from home to the far limit, in the motor's units. For continuous rotation,
-        the top speed (so screens can draw speed bars on the same scale)."""
-        if self.is_continuous(i):
-            return self.vmax(i)
+        """Distance from the top to the taught bottom, in mm."""
         m = self.motors[i]
         if m.get("commissioned") and m.get("bottom_fs"):
             return float(m["bottom_fs"]) * self.unit_per_rev(i) / self.mech["full_steps_per_rev"]
         t = m.get("travel_mm")
-        if t:
-            return float(t)
-        return float(self.mech["travel_mm"]) if self.kind(i) == "spool" else self.kind_info(i)["travel"]
+        return float(t) if t else float(self.mech["travel_mm"])
 
     def bottom_usteps(self, i: int) -> int:
         """Taught bottom limit in microsteps (what the node enforces)."""

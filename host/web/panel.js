@@ -1,19 +1,22 @@
-/* Kinetic operator panel — touch UI for the 7" Touch Display 2 (1280×720).
- * Talks to the same controller as the Moves screen: /api/state, /api/show, /api/config and the /ws socket.
- * No text entry anywhere: steppers, toggles and buttons only (the OS keyboard can't show over kiosk mode).
+/* Bloom Birds touch panel, for the Pi's 7" Touch Display 2 (1280×720, landscape).
+ *
+ * Two views. RUN is all that is needed day to day: Run / Hold / Park, the birds' heights, and
+ * the four knobs of the flap. SERVICE is for setting up a bird, reading the log, and turning
+ * the screen. No typing anywhere: buttons only.
+ *
+ * It talks to the controller two ways: GET /api/state once (bird names, the list of knobs),
+ * and the /ws socket (live state in 20 times a second, commands out). If the socket drops it
+ * reconnects by itself and covers the screen until it is back.
  */
 "use strict";
 
-const P = { config: null, show: null, host: null, simulate: false, tick: null, ws: null, wsOk: false,
-  selAxis: 0, events: [], lastWarn: null, cardsKey: "", actionsKey: "", moves: null };
+const P = { config: null, moves: null, host: null, tick: null, ws: null, wsOk: false, lastTick: 0,
+  events: [], lastWarn: null, knobKey: "", birdKey: "" };
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-const fmtTime = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
 const led = (st) => `<span class="led ${st || ""}"></span>`;
-const pct = (v) => `${Math.round(v * 100)}%`;
-const nAxes = () => P.config.motors.length;
 
 async function api(method, url, body) {
   const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
@@ -30,51 +33,40 @@ function send(cmd, extra = {}) {
   toast("Not connected to the controller", true); return false;
 }
 
-// ------------------------------------------------------------ modal (replaces confirm/prompt)
-function modal(msg, buttons, bodyHtml = "") {
+// ------------------------------------------------------------ confirm box (browser dialogs would freeze a kiosk)
+function confirmBox(msg, ok = "OK", danger = false) {
   return new Promise((resolve) => {
     $("#modalMsg").textContent = msg;
-    $("#modalBody").innerHTML = bodyHtml;
-    $("#modalBtns").innerHTML = buttons.map((b, i) => `<button class="big ${b.cls || ""}" data-i="${i}">${esc(b.label)}</button>`).join("");
+    $("#modalBody").innerHTML = "";
+    $("#modalBtns").innerHTML = `<button class="big" data-v="0">Cancel</button><button class="big ${danger ? "danger" : "primary"}" data-v="1">${esc(ok)}</button>`;
     const m = $("#modal"); m.hidden = false;
-    const done = (v) => { m.hidden = true; m.onclick = null; resolve(v); };
     m.onclick = (ev) => {
       const b = ev.target.closest("button");
-      if (b?.dataset.i !== undefined) done(buttons[+b.dataset.i].value);
-      else if (b?.dataset.v !== undefined) done(b.dataset.v);
-      else if (ev.target === m) done(null);
+      if (!b && ev.target !== m) return;
+      m.hidden = true; m.onclick = null; resolve(b?.dataset.v === "1");
     };
   });
 }
-const confirmBox = (msg, ok = "OK", danger = false) =>
-  modal(msg, [{ label: "Cancel", value: false }, { label: ok, value: true, cls: danger ? "danger" : "primary" }]);
 
 // ------------------------------------------------------------ data
 async function loadState() {
   const st = await api("GET", "/api/state");
-  P.config = st.config; P.show = st.show; P.host = st.host; P.simulate = st.simulate; P.moves = st.moves;
-  P.selAxis = clamp(P.selAxis, 0, nAxes() - 1);
-  renderFlap(true); renderSystem();
+  P.config = st.config; P.moves = st.moves; P.host = st.host; P.simulate = st.simulate;
+  P.knobKey = ""; P.birdKey = "";
 }
 function connectWs() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   P.ws = ws;
-  ws.onopen = () => { P.wsOk = true; };
+  ws.onopen = () => { P.wsOk = true; loadState().catch(() => {}); };      // the controller may have restarted
   ws.onclose = () => { P.wsOk = false; setTimeout(connectWs, 1500); };
   ws.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m.type === "tick") {
-      P.tick = m; if (m.events) addEvents(m.events);
-      // the show was changed on another screen: reload it
-      if (P.showRev !== undefined && m.show_rev !== P.showRev && !P.reloading) {
-        P.reloading = true; loadState().finally(() => { P.reloading = false; });
+      P.tick = m; P.lastTick = Date.now(); if (m.events) addEvents(m.events);
+      if (P.config && m.travel.length !== P.config.motors.length && !P.reloading) {   // birds added or removed
+        P.reloading = true; loadState().catch(() => {}).finally(() => { P.reloading = false; });
       }
-      P.showRev = m.show_rev;
-      if (P.config && m.travel && m.travel.length !== P.config.motors.length && !P.reloading) {   // motors added/removed
-        P.reloading = true; loadState().then(() => { P.cardsKey = ""; P.actionsKey = ""; }).finally(() => { P.reloading = false; });
-      }
-    }
-    else if (m.type === "events") addEvents(m.events);
+    } else if (m.type === "events") addEvents(m.events);
     else if (m.type === "error") toast(m.msg, true);
   };
 }
@@ -85,360 +77,177 @@ function addEvents(evs) {
     `<div class="${e.level}"><time>${new Date(e.t * 1000).toLocaleTimeString()}</time><span>${esc(e.msg)}</span></div>`).join("");
 }
 
-// ------------------------------------------------------------ node helpers
-function duplicateIds() {
-  const seen = {}, dup = new Set();
-  for (const nd of P.tick?.nodes || []) if (nd.online && nd.id !== null) { if (seen[nd.id]) dup.add(nd.id); seen[nd.id] = 1; }
-  return dup;
-}
-function nodeFault(nd) {
-  if (!nd) return "Not detected";
-  if (!nd.online) return "Offline";
+// ------------------------------------------------------------ birds
+const nBirds = () => P.tick?.travel.length || 0;
+const nameOf = (i) => P.config?.motors[i]?.name || `M${i + 1}`;
+const nodeFor = (i) => (P.tick?.nodes || []).find((nd) => nd.online && nd.id === i) || (P.tick?.nodes || []).find((nd) => nd.id === i);
+const isEmpty = (i) => !P.tick?.commissioned?.[i] && !nodeFor(i);      // no board yet: not a fault
+function birdFault(i) {
+  if (isEmpty(i)) return "";
+  const nd = nodeFor(i);
+  if (!nd) return "Board not detected";
+  if (!nd.online) return "Offline: check its power";
   const f = nd.flags;
-  if (nd.id !== null && duplicateIds().has(nd.id)) return "Duplicate axis number";
-  if (!f.includes("power_good")) return "No USB-PD power";
-  if (!f.includes("tmc_ok")) return "Driver not responding";
-  if (f.includes("overtemp")) return "Driver over temperature";
-  if (f.includes("home_failed")) return "Homing failed";
-  if (f.includes("slip")) return "Position error";
-  if (f.includes("link_lost") && nd.id !== null) return "Command stream lost";
-  if (memoryMode() && !f.includes("unassigned")) {
-    const setupMac = P.tick?.setup_macs?.[nd.id];
-    if (P.tick?.commissioned?.[nd.id] && setupMac && setupMac !== nd.mac) return "Different board than was set up: run Motor Setup";
-    if (!f.includes("calibrated")) return "Not set up: Motor Setup";
-    if (!f.includes("homed") && P.tick?.kinds?.[nd.id] !== "continuous") return "Position unknown: Motor Setup > Find home";
-  }
+  if (!f.includes("power_good")) return "No power from its supply";
+  if (!f.includes("tmc_ok")) return "Motor driver not responding";
+  if (f.includes("overtemp")) return "Motor driver too hot";
+  if (f.includes("slip")) return "Slipped: position error";
+  if (f.includes("link_lost")) return "Radio link lost";
+  if (!P.tick.commissioned[i] || !f.includes("calibrated")) return "Not set up: Service → Set up";
+  if (!f.includes("homed")) return "Position unknown: Service → Set up → Find top only";
   return "";
 }
-const memoryMode = () => (P.tick?.home_mode || P.config?.mechanics.home_mode) === "memory";
-const unitOf = (i) => P.tick?.units?.[i] || "mm";
-const JOG_STEPS = { spool: [50, 10], linear: [20, 5], rotary: [45, 10], continuous: [1, 0.25] };
-const travelOf = (i) => P.tick?.travel?.[i] ?? (P.config.motors[i].travel_mm || P.config.mechanics.travel_mm);
 const setupUrl = (q) => `/setup?from=panel&${new URLSearchParams(q)}`;
-// A position that has never been set up and has no board yet is "empty", not a fault.
-const isEmptySlot = (i) => !P.tick?.commissioned?.[i] && !(P.tick?.nodes || []).some((nd) => nd.id === i);
-const slotFault = (i) => (isEmptySlot(i) ? "" : nodeFault(nodeFor(i)));
-const nodeFor = (i) => (P.tick?.nodes || []).find((nd) => nd.online && nd.id === i) || (P.tick?.nodes || []).find((nd) => nd.id === i);
 
-// ------------------------------------------------------------ top bar + status
-const MODE = { idle: "IDLE", play: "SHOW RUNNING", hold: "HOLDING", park: "PARKING" };
+// ------------------------------------------------------------ top bar, state, footer
 function renderTop() {
-  const tk = P.tick;
-  const L = [`<span class="light">${led(P.wsOk ? "on" : "bad")}Controller</span>`];
+  const tk = P.tick, stale = !P.wsOk || Date.now() - P.lastTick > 3000;
+  $("#offline").hidden = !stale || !P.lastTick;
+  const L = [`<span class="light">${led(stale ? "bad" : "on")}Controller</span>`];
   if (tk) {
-    L.push(`<span class="light">${led(tk.link ? "on" : "bad")}Bridge</span>`);
-    const ids = new Set(tk.nodes.filter((nd) => nd.online && nd.id !== null && nd.id < nAxes()).map((nd) => nd.id));
-    const homed = [...ids].filter((i) => nodeFor(i)?.flags.includes("homed")).length;
-    const faults = P.config.motors.filter((m, i) => slotFault(i)).length;
-    L.push(`<span class="light">${led(ids.size === nAxes() ? "on" : ids.size ? "warn" : "bad")}Axes <b>${ids.size}/${nAxes()}</b></span>`);
-    L.push(`<span class="light">${led(homed === nAxes() ? "on" : homed ? "warn" : "")}${memoryMode() ? "Located" : "Homed"} <b>${homed}/${nAxes()}</b></span>`);
-    L.push(`<span class="light">${led(faults ? "bad" : "")}Faults <b>${faults}</b></span>`);
+    const n = nBirds(), ready = [...Array(n).keys()].filter((i) => !isEmpty(i) && !birdFault(i)).length;
+    const used = [...Array(n).keys()].filter((i) => !isEmpty(i)).length;
+    const fi = [...Array(n).keys()].find((i) => birdFault(i));
+    L.push(`<span class="light">${led(tk.link ? "on" : "bad")}Radio</span>`);
+    L.push(`<span class="light">${led(used && ready === used ? "on" : ready ? "warn" : "bad")}Birds ready <b>${ready}/${used}</b></span>`);
     if (P.simulate) L.push(`<span class="light">${led("warn")}Simulation</span>`);
-    const b = $("#btnEnable");
-    b.setAttribute("aria-pressed", String(tk.armed));
-    $("#enLed").className = "led" + (tk.armed ? " on" : "");
-    $("#enText").textContent = tk.armed ? "ENABLED" : "DISABLED";
 
-    $("#stState").textContent = `${tk.armed ? "Axes enabled" : "Axes disabled"} · ${tk.startup === "running" ? "running" : "startup: " + tk.startup}`;
+    const st = $("#state"), running = tk.armed && tk.mode === "play";
+    const label = !tk.armed ? "STOPPED" : tk.mode === "play" ? "RUNNING" : tk.mode === "park" ? "PARKED AT TOP" : "HOLDING";
+    st.textContent = label; st.className = "state" + (tk.armed ? "" : " stopped");
+    $("#stateSub").textContent = !tk.armed ? "Motors are off. Press Run to start the birds."
+      : running && !tk.fit.ok ? "Flap is set faster than the motors can follow." : "";
+    $$(".cmds .big").forEach((b) => b.classList.toggle("cur", tk.armed && { run: "play", hold: "hold", park: "park" }[b.dataset.cmd] === tk.mode));
+
+    $("#stState").textContent = tk.startup === "running" || tk.armed ? label.toLowerCase() : `startup: ${tk.startup}`;
     const exc = $("#stException");
-    const fi = P.config.motors.findIndex((m, i) => slotFault(i));
-    if (fi >= 0) { exc.className = "exc bad"; exc.textContent = `${P.config.motors[fi].name}: ${slotFault(fi)}`; }
+    if (!tk.link) { exc.className = "exc bad"; exc.textContent = "Radio bridge not connected: check its USB cable"; }
+    else if (fi !== undefined) { exc.className = "exc bad"; exc.textContent = `${nameOf(fi)}: ${birdFault(fi)}`; }
     else if (P.lastWarn && Date.now() / 1000 - P.lastWarn.t < 120) { exc.className = "exc warn"; exc.textContent = P.lastWarn.msg; }
-    else { exc.className = "exc"; exc.textContent = "No exceptions"; }
+    else { exc.className = "exc"; exc.textContent = "No faults"; }
   }
   $("#lights").innerHTML = L.join("");
 }
-$("#btnEnable").onclick = async () => {
-  const on = !P.tick?.armed;
-  if (on && !(await confirmBox("Enable axes? The motors will start following the show.", "Enable"))) return;
-  send("arm", { on });
-};
-$("#btnStop").onclick = () => { send("stop_all"); toast("All axes stopping"); };
-
-// ------------------------------------------------------------ run view
-const moveOf = () => P.tick?.move || P.show?.moves?.[0];
-const moveLabel = (m) => P.moves?.[m?.type]?.label || "—";
-function fitText(fit) {
-  if (!fit) return "";
-  return fit.ok ? `Fastest these motors can flap this far: ${fit.fastest.toFixed(1)} s`
-    : `Too fast for the motors: they will lag. Fastest for this stroke is ${fit.fastest.toFixed(1)} s.`;
-}
-function renderRun() {
-  const tk = P.tick; if (!tk) return;
-  const m = moveOf(), playing = tk.mode === "play";
-  $("#nowMode").textContent = MODE[tk.mode] || tk.mode.toUpperCase();
-  $("#nowClip").textContent = playing ? moveLabel(m) : "—";
-  $("#nowBar").style.width = `${playing && tk.phase !== null ? tk.phase * 100 : 0}%`;
-  $("#nowTime").textContent = playing && m ? `${m.period.toFixed(1)} s per flap` : "—";
-  $("#nowNext").textContent = "";
-  const adj = $("#nowAdj");
-  adj.textContent = playing && tk.fit && !tk.fit.ok ? fitText(tk.fit) : "";
-  adj.style.color = "#8a5a00";
-}
+$("#btnStop").onclick = () => { send("stop_all"); toast("All motors stopping"); };
 $$("[data-cmd]").forEach((b) => b.addEventListener("click", async () => {
-  if (b.dataset.cmd === "play" && !P.tick?.armed) {
-    // the show only drives the motors while ENABLED (Motor Setup and Stop All disable them)
-    const v = await modal("The motors are DISABLED, so the show would only play on screen.",
-      [{ label: "Cancel", value: null }, { label: "Preview on screen", value: "preview" }, { label: "Enable & Run", value: "run", cls: "primary" }]);
-    if (!v) return;
-    if (v === "run") send("arm", { on: true });
+  const c = b.dataset.cmd, armed = !!P.tick?.armed;
+  // Run and Park move the birds. If the motors are off, ask first, then switch them on.
+  if (c !== "hold" && !armed) {
+    if (!(await confirmBox(c === "run" ? "Start the birds? Keep people clear of them." : "Move every bird to its top position?", c === "run" ? "Run" : "Park"))) return;
+    send("arm", { on: true });
   }
-  send(b.dataset.cmd);
+  send(c === "run" ? "play" : c);
 }));
 
-function fitCanvas(cv) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
-  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-  const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return [ctx, cv.clientWidth, cv.clientHeight];
-}
 function drawGauges() {
-  const cv = $("#gauges"); if (!cv.clientWidth || !P.config) return;
-  const [ctx, W, H] = fitCanvas(cv);
+  const cv = $("#gauges"), tk = P.tick; if (!cv.clientWidth || !tk || !P.config) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
-  const tk = P.tick, n = nAxes();
-  const T = 10, B = 44, colW = W / n, bw = Math.min(46, colW * 0.42);
-  // same units everywhere: one scale. Mixed mechanisms: each bar is its own travel (0-100%).
-  const units = P.config.motors.map((m, i) => unitOf(i)), uniform = units.every((u) => u === units[0]);
-  const travelMax = Math.max(...P.config.motors.map((m, i) => travelOf(i)));
+  const n = nBirds(), T = 10, B = 46, colW = W / n, bw = Math.min(60, colW * 0.45);
   for (let i = 0; i < n; i++) {
-    const scale = uniform ? travelMax : travelOf(i) || 1;
-    const y = (v) => T + (Math.abs(v) / scale) * (H - T - B);
-    const m = P.config.motors[i], cx = colW * (i + 0.5), travel = travelOf(i);
-    const out = tk?.out_mm?.[i] ?? 0, act = tk?.actual_mm?.[i], lim = tk?.limited?.[i], fault = slotFault(i);
-    ctx.fillStyle = "#eef0f2"; ctx.fillRect(cx - bw / 2, y(0), bw, y(travel) - y(0));
-    ctx.fillStyle = "#4a525b"; ctx.fillRect(cx - bw / 2, y(0), bw, Math.max(0, y(out) - y(0)));
+    const travel = tk.travel[i] || 1, cx = colW * (i + 0.5), y = (v) => T + (v / travel) * (H - T - B);
+    const empty = isEmpty(i), fault = birdFault(i), lim = tk.limited[i], act = tk.actual_mm[i];
+    ctx.fillStyle = "#eef0f2"; ctx.fillRect(cx - bw / 2, T, bw, H - T - B);
+    if (!empty) { ctx.fillStyle = "#4a525b"; ctx.fillRect(cx - bw / 2, T, bw, Math.max(0, y(tk.out_mm[i]) - T)); }
     ctx.strokeStyle = fault ? "#c62828" : lim ? "#d18a00" : "#c9cdd2"; ctx.lineWidth = fault || lim ? 3 : 1;
-    ctx.strokeRect(cx - bw / 2 + 0.5, y(0) + 0.5, bw - 1, y(travel) - y(0) - 1);
+    ctx.strokeRect(cx - bw / 2 + 0.5, T + 0.5, bw - 1, H - T - B - 1);
     if (act !== null && act !== undefined) {
       ctx.strokeStyle = "#2f63a4"; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.moveTo(cx - bw / 2 - 6, y(act)); ctx.lineTo(cx + bw / 2 + 6, y(act)); ctx.stroke();
     }
-    ctx.textAlign = "center"; ctx.fillStyle = "#1b1f23"; ctx.font = "600 14px 'Segoe UI', Roboto, Arial, sans-serif";
-    ctx.fillText(m.name, cx, H - 24);
-    ctx.font = "13px Consolas, Menlo, 'DejaVu Sans Mono', monospace"; ctx.fillStyle = "#4a525b";
-    const v = act ?? out, u = units[i];
-    ctx.fillText(u === "rev/s" ? `${v.toFixed(2)} rev/s` : `${Math.round(v)}${u === "°" ? "°" : ""}`, cx, H - 7);
+    ctx.textAlign = "center"; ctx.fillStyle = fault ? "#c62828" : "#1b1f23"; ctx.font = "600 16px 'Segoe UI', Roboto, Arial, sans-serif";
+    ctx.fillText(nameOf(i), cx, H - 26);
+    ctx.font = "14px Consolas, Menlo, 'DejaVu Sans Mono', monospace"; ctx.fillStyle = "#4a525b";
+    ctx.fillText(empty ? "empty" : fault ? "fault" : `${Math.round(act ?? tk.out_mm[i])}`, cx, H - 8);
   }
 }
 
-// ------------------------------------------------------------ axes view
-function renderAxes() {
-  if (!P.tick) return;
-  const nodes = P.tick.nodes;
-  const unassigned = nodes.filter((nd) => nd.online && nd.id === null);
-  const key = P.config.motors.map((m, i) => m.name + unitOf(i)).join("|") + "#" + unassigned.map((n) => n.mac).join(",");
-  const wrap = $("#axisCards");
-  if (key !== P.cardsKey) {
-    P.cardsKey = key;
-    wrap.innerHTML = P.config.motors.map((m, i) => `<button class="card" data-axis="${i}">
-        <div class="card-top"><span class="card-name">${esc(m.name)}</span><span class="card-id">#${i}</span></div>
-        <div class="card-pos"><span data-f="pos">—</span> <small>${esc(unitOf(i))}</small></div>
-        <div class="card-leds"><span>${led()}Link</span><span>${led()}${memoryMode() ? "Located" : "Homed"}</span><span>${led()}En</span></div>
-        <div class="card-meta" data-f="meta"></div>
-        <div class="card-fault" data-f="fault"></div></button>`).join("") +
-      unassigned.map((nd) => `<button class="card unassigned" data-mac="${nd.mac}">
-        <div class="card-top"><span class="card-name">New node</span><span class="card-id">unassigned</span></div>
-        <div class="card-pos" style="font-size:14px">${esc(nd.mac)}</div>
-        <div class="card-fault" style="color:#8a5a00">Tap to identify and set up</div></button>`).join("") +
-      (P.config.motors.length < 16 ? `<button class="card add-card" data-add="1">
-        <div class="card-name">+ Add Motor</div>
-        <div class="card-fault" style="color:var(--ink-3)">Set up a new PD Stepper as M${P.config.motors.length + 1}</div></button>` : "");
-  }
-  $$("#axisCards .card[data-axis]").forEach((card) => {
-    const i = +card.dataset.axis, nd = nodeFor(i), empty = isEmptySlot(i), fault = slotFault(i), f = nd?.flags || [];
-    card.classList.toggle("sel", i === P.selAxis);
-    card.classList.toggle("fault", !!fault);
-    card.querySelector('[data-f="pos"]').textContent = nd && (f.includes("homed") || !memoryMode()) ? nd.pos_mm.toFixed(1) : "—";
-    const leds = card.querySelectorAll(".card-leds .led");
-    leds[0].className = "led " + (nd?.online ? "on" : empty ? "" : "bad");
-    leds[1].className = "led " + (f.includes("homing") ? "warn" : f.includes("homed") ? "on" : "");
-    leds[2].className = "led " + (f.includes("enabled") ? "on" : "");
-    card.querySelector('[data-f="fault"]').textContent = empty ? "Empty position: tap Motor Setup to add its board" : fault;
-    card.classList.toggle("empty", empty);
-    card.querySelector('[data-f="meta"]').textContent = nd
-      ? `${nd.vbus.toFixed(1)} V · enc Δ ${nd.err_mm === null ? "—" : nd.err_mm.toFixed(1) + " mm"} · ${nd.rssi} dBm` : "";
-  });
-  renderAxisActions();
+// ------------------------------------------------------------ the four knobs
+const knobFmt = (p, v) => (p.unit === "%" ? `${Math.round(v * 100)}%` : `${v.toFixed(1)} s`);
+function knobStep(p, v, d) {                      // seconds per flap: fine steps when fast, coarse when slow
+  if (p.key !== "period") return p.step;
+  return (d < 0 ? v <= 2 : v < 2) ? 0.1 : 0.5;
 }
-function renderAxisActions() {
-  const i = P.selAxis, m = P.config.motors[i], nd = nodeFor(i), armed = !!P.tick?.armed;
-  const mem = memoryMode();
-  const key = `${i}|${armed}|${!!nd}|${mem}|${P.tick?.kinds?.[i]}`;
-  if (key === P.actionsKey) return;
-  P.actionsKey = key;
-  const dis = armed ? "disabled" : "";
-  $("#axisActions").innerHTML = `<span class="lbl">${esc(m?.name || "")}</span>
-    <button class="mid" data-act="setup">Motor Setup</button>
-    <button class="mid" data-act="identify" ${nd ? "" : "disabled"}>Identify</button>
-    <button class="mid" data-act="home" ${nd ? "" : "disabled"}>${mem ? "To Top" : "Home"}</button>
-    <span class="sep"></span>
-    ${(() => { const [a, b] = JOG_STEPS[P.tick?.kinds?.[i] || "spool"] || JOG_STEPS.spool;
-      return `<button class="mid" data-act="jog" data-mm="${-a}" ${dis}>▲ ${a}</button>
-    <button class="mid" data-act="jog" data-mm="${-b}" ${dis}>▲ ${b}</button>
-    <button class="mid" data-act="jog" data-mm="${b}" ${dis}>▼ ${b}</button>
-    <button class="mid" data-act="jog" data-mm="${a}" ${dis}>▼ ${a}</button>`; })()}
-    <span class="sep"></span>
-    ${mem ? "" : `<button class="mid" data-act="zero" ${dis}>Set Zero</button>`}
-    <button class="mid" data-act="release" ${dis}>Release</button>
-    <button class="mid" data-act="remove" ${P.config.motors.length <= 1 ? "disabled" : ""}>Remove</button>
-    ${armed ? `<span class="note">Disable axes to jog, zero or release.</span>` : `<span class="note">▲ toward home · ▼ away (${esc(unitOf(i))})</span>`}`;
-}
-$("#axisCards").addEventListener("click", async (ev) => {
-  const card = ev.target.closest(".card"); if (!card) return;
-  if (card.dataset.add) { location.href = setupUrl({ new: 1 }); return; }
-  if (card.dataset.axis !== undefined) { P.selAxis = +card.dataset.axis; P.actionsKey = ""; renderAxes(); return; }
-  const mac = card.dataset.mac;
-  send("identify", { mac });
-  const taken = (i) => (P.tick?.nodes || []).some((nd) => nd.online && nd.id === i && nd.mac !== mac);
-  const body = P.config.motors.map((m, i) => `<button class="mid ${taken(i) ? "taken" : ""}" data-v="${i}">${esc(m.name)}${taken(i) ? "<small>in use</small>" : ""}</button>`).join("");
-  const v = await modal(`Node ${mac} is flashing its lights. Which axis is it?`,
-    [{ label: "Cancel", value: null }, { label: "Full Motor Setup…", value: "setup", cls: "primary" }], body);
-  if (v === null || v === undefined) return;
-  if (v === "setup") { location.href = setupUrl({ mac }); return; }
-  const name = P.config.motors[+v].name;
-  if (taken(+v) && !(await confirmBox(`${name} already has a node. Two nodes on one axis will both follow the same motion. Assign anyway?`, "Assign", true))) return;
-  send("assign", { mac, new_id: +v }); toast(`Assigned as ${name}`); P.cardsKey = "";
-});
-$("#axisActions").addEventListener("click", async (ev) => {
-  const b = ev.target.closest("button[data-act]"); if (!b || b.disabled) return;
-  const i = P.selAxis, nd = nodeFor(i), name = P.config.motors[i].name;
-  switch (b.dataset.act) {
-    case "identify": if (nd) send("identify", { mac: nd.mac }); break;
-    case "setup": location.href = setupUrl(nd ? { motor: i, mac: nd.mac } : { motor: i }); break;
-    case "home": if (await confirmBox(memoryMode() ? `Move ${name} to its taught home position?` : `Home ${name}? It will wind in until it reaches its home switch.`, memoryMode() ? "To Top" : "Home")) send("home", { id: i }); break;
-    case "jog": send("jog", { id: i, mm: +b.dataset.mm }); break;
-    case "zero": if (await confirmBox(`Set ${name}'s current position as home (fully wound in)?`, "Set Zero")) send("set_zero", { id: i }); break;
-    case "release": send("enable", { id: i, on: false }); toast(`${name} released`); break;
-    case "remove": {
-      const later = nAxes() - 1 - i;
-      const msg = `Remove ${name}? Its board is released and its setup is discarded.` +
-        (later > 0 ? ` The ${later} motor(s) after it move down one number; their boards are renumbered automatically.` : "");
-      if (await confirmBox(msg, "Remove", true)) { send("remove_motor", { id: i }); P.selAxis = Math.max(0, i - 1); toast(`${name} removed`); }
-      break;
-    }
-  }
-});
-
-// ------------------------------------------------------------ flap view
-// Steppers only (no typing on the touch screen). The knob list comes from the controller.
-const knobFmt = (p, v) => (p.unit === "%" ? pct(v) : `${v.toFixed(1)} s`);
-const knobStep = (p, v, d) => (p.key === "period" ? (v + d * 1e-9 < 2 || (v <= 2 && d < 0) ? 0.1 : 0.5) : p.step);
-function renderFlap(rebuild = false) {
-  const m = moveOf(), def = P.moves?.[m?.type]; if (!m || !def) return;
-  const grid = $("#flapGrid");
-  if (rebuild || !grid.children.length) {
-    grid.innerHTML = def.params.map((p) => `<div class="box">
-        <div class="box-h">${esc(p.label)}</div>
-        <div class="stepper big-step">
-          <button class="big" data-knob="${p.key}" data-d="-1" aria-label="${esc(p.label)} down">−</button>
-          <div class="step-val" data-val="${p.key}"></div>
-          <button class="big" data-knob="${p.key}" data-d="1" aria-label="${esc(p.label)} up">+</button>
-        </div>
-        ${p.key === "period" ? `<button class="mid wide" data-fastest="1" style="margin-top:8px">Set to fastest the motors can do</button>
-          <p class="hint" id="flapFit"></p>` : `<p class="hint">${esc(p.help)}</p>`}
-      </div>`).join("") + `<div class="box"><div class="box-h">Power-Up</div><div class="toggles" id="startToggles"></div></div>`;
-    renderStartToggles();
+function renderKnobs() {
+  const m = P.tick?.move, def = P.moves?.[m?.type]; if (!m || !def) return;
+  if (P.knobKey !== m.type) {
+    P.knobKey = m.type;
+    $("#knobs").innerHTML = def.params.map((p) => `<div class="knob-row"><div class="lbl">${esc(p.label)}</div>
+      <div class="stepper">
+        <button class="big" data-knob="${p.key}" data-d="-1" aria-label="${esc(p.label)} down">−</button>
+        <div class="step-val" data-val="${p.key}"></div>
+        <button class="big" data-knob="${p.key}" data-d="1" aria-label="${esc(p.label)} up">+</button>
+      </div></div>`).join("");
   }
   for (const p of def.params) $(`[data-val="${p.key}"]`).textContent = knobFmt(p, m[p.key]);
-  const f = $("#flapFit"), fit = P.tick?.fit;
-  if (f) { f.textContent = fitText(fit); f.style.color = fit && !fit.ok ? "#c62828" : ""; }
+  const fit = P.tick.fit, f = $("#fit");
+  f.className = "fit-line" + (fit.ok ? "" : " bad");
+  f.textContent = fit.ok ? `Fastest for this stroke: ${fit.fastest.toFixed(1)} s per flap.`
+    : `Too fast: the birds will lag. Fastest for this stroke is ${fit.fastest.toFixed(1)} s.`;
 }
-$("#flapGrid").addEventListener("click", async (ev) => {
-  const st = ev.target.closest("[data-start]");
-  if (st) {
-    const k = st.dataset.start;
-    const r = await api("PUT", "/api/config", { [k]: !P.config[k] });
-    P.config = r.config; renderStartToggles(); return;
-  }
-  const b = ev.target.closest("button"); if (!b) return;
-  const m = moveOf(), def = P.moves?.[m?.type]; if (!m || !def) return;
-  if (b.dataset.fastest) {
-    const fit = P.tick?.fit; if (!fit?.fastest) return;
-    send("set_move", { knobs: { period: fit.fastest } }); toast(`Set to ${fit.fastest.toFixed(1)} s per flap`); return;
-  }
-  const p = def.params.find((x) => x.key === b.dataset.knob); if (!p) return;
-  const d = +b.dataset.d, step = knobStep(p, m[p.key], d);
+$("#knobs").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-knob]"); if (!b) return;
+  const m = P.tick?.move, def = P.moves?.[m?.type]; if (!m || !def) return;
+  const p = def.params.find((x) => x.key === b.dataset.knob), d = +b.dataset.d, step = knobStep(p, m[p.key], d);
   const v = clamp(Math.round((m[p.key] + d * step) / step) * step, p.min, p.max);
   send("set_move", { knobs: { [p.key]: Math.round(v * 1000) / 1000 } });
 });
-const START = [{ key: "autoplay", label: "Run show at power-up" }, { key: "auto_home", label: "Home axes before running" }];
-function renderStartToggles() {
-  if (!$("#startToggles")) return;
-  $("#startToggles").innerHTML = START.map((s) =>
-    `<label><button class="tog" role="switch" aria-checked="${!!P.config[s.key]}" data-start="${s.key}" aria-label="${esc(s.label)}"></button>${esc(s.label)}</label>`).join("");
-}
-// ------------------------------------------------------------ system view
-function renderSystem() {
-  const h = P.host || {}, tk = P.tick;
-  if ($("#motorCount")) $("#motorCount").textContent = nAxes();
-  $$(".sim-only").forEach((b) => (b.hidden = !P.simulate));
-  const homeBtn = $('[data-sys="home"]');
-  if (homeBtn) homeBtn.textContent = memoryMode() ? "All Axes To Top" : "Home All Axes";
-  const urls = [`http://${h.hostname || "raspberrypi"}.local:8080`, ...(h.ips || []).map((ip) => `http://${ip}:8080`)];
-  $("#sysInfo").innerHTML = `<dt>Moves screen</dt><dd>${urls.map(esc).join("<br>")}</dd>
-    <dt>Bridge</dt><dd>${tk ? (tk.link ? esc(tk.port) + (tk.bridge ? ` · ch ${tk.bridge.channel}` : "") : "not connected") : "—"}</dd>
-    <dt>Radio TX</dt><dd>${tk?.bridge ? `${tk.bridge.tx_ok} ok · ${tk.bridge.tx_fail} failed` : "—"}</dd>
-    <dt>Axes</dt><dd>${nAxes()} configured</dd>`;
-}
-$("#v-system").addEventListener("click", async (ev) => {
-  const cnt = ev.target.closest("[data-count]");
-  if (cnt) {
-    const n = nAxes(), d = +cnt.dataset.count;
-    if (d < 0) {
-      if (n <= 1) { toast("Keep at least one motor", true); return; }
-      const last = n - 1, busy = P.tick?.commissioned?.[last] || (P.tick?.nodes || []).some((nd) => nd.online && nd.id === last);
-      if (busy && !(await confirmBox(`${P.config.motors[last].name} is set up or has a board. Remove it?`, "Remove", true))) return;
-    }
-    send("set_motor_count", { n: n + d, force: true });
-    return;
-  }
-  const b = ev.target.closest("[data-sys]"); if (!b) return;
-  const a = b.dataset.sys;
-  if (a === "setup") { location.href = setupUrl({}); return; }
-  if (a === "add_motor") { location.href = setupUrl({ new: 1 }); return; }
-  if (a === "remove_unused") {
-    if (await confirmBox("Remove every motor that hasn't been set up and has no board reporting?", "Remove", true)) send("remove_unused");
-    return;
-  }
-  if (a === "sim_cut" || a === "sim_cut_fail") {
-    const ok = await confirmBox(a === "sim_cut" ? "SIMULATOR: cut power to every motor? Their power-loss save works." :
-      "SIMULATOR: cut power to every motor, with the power-loss save FAILING? Motors that were moving lose their position.", "Cut power", true);
-    if (ok) send("sim_power_cut", { save_works: a === "sim_cut" });
-    return;
-  }
-  const msg = { autostart: "Run the startup sequence? Axes will be found, configured and checked, then the show starts.",
-    home: memoryMode() ? "Move every axis to its taught home position? The show stops." : "Home every axis? The show stops and all cables wind in to their home switches.",
-    push_config: "Resend mechanics settings to every axis?" }[a];
-  if (!(await confirmBox(msg, b.textContent))) return;
-  send(a, a === "autostart" ? {} : { id: "all" });
-});
+$("#btnFastest").onclick = () => {
+  const fit = P.tick?.fit; if (!fit?.fastest) return;
+  send("set_move", { knobs: { period: fit.fastest } }); toast(`Set to ${fit.fastest.toFixed(1)} s per flap`);
+};
 
-// ------------------------------------------------------------ navigation + loop
-$$(".nav").forEach((b) => b.addEventListener("click", async () => {
-  $$(".nav").forEach((x) => x.classList.toggle("active", x === b));
-  $$(".view").forEach((v) => v.classList.toggle("active", v.id === `v-${b.dataset.view}`));
-  if (b.dataset.view === "flap" || b.dataset.view === "system") await loadState();   // pick up laptop edits
-  P.cardsKey = ""; P.actionsKey = "";
-}));
+// ------------------------------------------------------------ service view
+function renderService() {
+  const tk = P.tick; if (!tk || !P.config) return;
+  const rows = [...Array(nBirds()).keys()].map((i) => {
+    const nd = nodeFor(i), fault = birdFault(i), empty = isEmpty(i);
+    const detail = nd ? `${nd.vbus.toFixed(1)} V · radio ${nd.rssi} dBm · top speed ${Math.round(tk.vmax[i])} mm/s${tk.speed_test[i] ? "" : " (not speed tested)"}` : "";
+    return `<div class="bird-row"><b>${esc(nameOf(i))}</b>
+      <div class="st ${fault ? "bad" : ""}">${empty ? "Empty position" : fault || "Ready"}<small>${esc(detail)}</small></div>
+      <button class="mid" data-setup="${i}">Set up</button></div>`;
+  });
+  const fresh = tk.nodes.filter((nd) => nd.online && nd.id === null).map((nd) =>
+    `<div class="bird-row"><b>New</b><div class="st">New board found<small>${esc(nd.mac)}</small></div>
+      <button class="mid" data-mac="${nd.mac}">Set up</button></div>`);
+  const html = rows.concat(fresh).join("");
+  if (html !== P.birdKey) { P.birdKey = html; $("#birdList").innerHTML = html; }
+  const h = P.host || {};
+  $("#addr").textContent = `Moves screen from a laptop: http://${h.hostname || "bloombirds"}.local:8080` + ((h.ips || [])[0] ? ` or http://${h.ips[0]}:8080` : "");
+}
+$("#birdList").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button"); if (!b) return;
+  if (b.dataset.mac) { location.href = setupUrl({ mac: b.dataset.mac }); return; }
+  const i = +b.dataset.setup, nd = nodeFor(i);
+  location.href = setupUrl(nd ? { motor: i, mac: nd.mac } : { motor: i });
+});
+$("#btnAdd").onclick = () => { location.href = setupUrl({ new: 1 }); };
+$("#btnRotate").onclick = () => { window.screenRotation.flip(); toast("Screen flipped"); };
+$("#btnService").onclick = () => {
+  const on = $("#btnService").getAttribute("aria-pressed") !== "true";
+  $("#btnService").setAttribute("aria-pressed", String(on));
+  $("#btnService").textContent = on ? "Back" : "Service";
+  $("#v-run").classList.toggle("active", !on); $("#v-service").classList.toggle("active", on);
+  P.birdKey = "";
+};
 document.addEventListener("contextmenu", (e) => e.preventDefault());   // long-press menus off
 
-let lastSlow = 0, lastState = 0;
+// ------------------------------------------------------------ loop
+let lastSlow = 0;
 function frame(ts) {
-  const view = $(".view.active").id;
-  if (view === "v-run") drawGauges();
-  if (ts - lastSlow > 250) {
-    lastSlow = ts; renderTop();
-    if (view === "v-run") renderRun();
-    if (view === "v-axes") renderAxes();
-    if (view === "v-flap") renderFlap();
-    if (view === "v-system") renderSystem();
-  }
-  if (ts - lastState > 15000 && $("#modal").hidden) { lastState = ts; loadState().catch(() => {}); }
+  try {
+    const run = $("#v-run").classList.contains("active");
+    if (run) drawGauges();
+    if (ts - lastSlow > 250) { lastSlow = ts; renderTop(); if (run) renderKnobs(); else renderService(); }
+  } catch (e) { console.error(e); }                 // one bad frame must never stop the panel
   requestAnimationFrame(frame);
 }
-loadState().then(() => { connectWs(); requestAnimationFrame(frame); }).catch((e) => {
-  document.body.insertAdjacentHTML("afterbegin", `<p style="padding:20px;color:#c62828;font-size:18px">Controller not reachable: ${esc(e.message)}. Retrying…</p>`);
-  setTimeout(() => location.reload(), 3000);
-});
+// If the controller isn't up yet (the Pi just booted), keep trying instead of showing an error page.
+(async function start() {
+  for (;;) {
+    try { await loadState(); break; } catch (e) { $("#stState").textContent = "Waiting for the controller…"; await new Promise((r) => setTimeout(r, 2000)); }
+  }
+  connectWs(); requestAnimationFrame(frame);
+})();

@@ -126,29 +126,18 @@ Wi-Fi is busy on channel 1, change it to 6 or 11 in **both** sketches.
   ever add one, wire it normally-open between **AUX pin 3 (AUX2)** and **AUX pin 1 (GND)** and
   choose *Limit switch* under Setup → Mechanics → Homing.
 
-## 3a. Mechanisms
+## 3a. Spools
 
-Each motor has its own mechanism, chosen in the first step of Motor Setup:
+Every motor drives a cable spool. Positions are millimetres of cable below the taught top. The
+first step of Motor Setup asks for the spool's diameter (measure it with cable on it), which is
+how motor turns become millimetres.
 
-| Mechanism | Units | Size setting | Ends taught |
-|---|---|---|---|
-| Cable spool | mm of cable | spool diameter | top / bottom |
-| Linear actuator | mm | lead (mm per motor turn) | home end / far end |
-| Rotary (angle) | degrees | gear ratio | start angle / end angle |
-| Continuous rotation | rev/s | gear ratio | none: the show sets its **speed** |
-
-The show always works in 0–1 (0 = home end, 1 = far end), so one move can drive spools,
-slides and arms at the same time. For continuous rotation, 0–1 is a speed: forward-only motors go
-from stopped (0) to full speed (1); "both directions" motors go from full reverse (0) through
-stopped (0.5) to full forward (1). Per-motor top speed and acceleration come from the speed test.
-
-A board whose ends are taught never free-runs: the firmware refuses speed commands while it has
-soft limits, so a spool can't be spun off its cable by a wrongly set mechanism.
+A board whose ends are taught refuses to move past them, whatever it is sent.
 
 ## 3b. Motor Setup and position memory (no home switches)
 
 **Every new or replaced PD Stepper goes through Motor Setup once.** Open it from the touch
-panel (Axes → *Motor Setup*, or tap a *New node* card), from the Moves screen (Birds → *Motor
+panel (Service → *Set up* next to a bird or a new board), from the Moves screen (Birds → *Motor
 Setup…*), or at `http://<pi>:8080/setup`.
 
 | Step | What happens |
@@ -164,8 +153,7 @@ Setup…*), or at `http://<pi>:8080/setup`.
 
 **Speed test.** The default limits (150 mm/s and 300 mm/s² on a spool, about 72 RPM on a 40 mm
 spool) are deliberately cautious. The speed test finds what each motor can really do:
-- It runs back and forth over the middle 60% of the taught travel (continuous motors: 10 turns
-  at a time), starting at half the current limit and going 30% faster each run.
+- It runs back and forth over the middle 60% of the taught travel, starting at half the current limit and going 30% faster each run.
 - After every run it compares where the driver stepped to with where the encoder says the shaft
   went. A gap of more than about 1/20 of a turn means the motor slipped, and the test stops
   there. If a run slips while it was also ramping harder than any clean run, it retries that
@@ -180,18 +168,12 @@ spool) are deliberately cautious. The speed test finds what each motor can reall
   supply voltage. A slipped run makes a buzz or clunk; that's expected and harmless.
 - For a motor that's already set up, choose it in Motor Setup and press **Speed test only**.
 
-**Adding and removing motors.** A new install starts with one motor.
-- **Set how many positions** with the **Motors − N +** control (panel System view).
-  **+** adds an empty position: it shows as a dashed card, isn't counted as a fault, and doesn't
-  hold up startup. Set it up when its board is installed. **−** removes the last position (it asks
-  first if that motor is set up).
-- **Add a motor** with **Add a bird…** on the Moves screen, or **Add Motor…** on the panel (System view, or the
-  dashed **+ Add Motor** card on the Axes view). It opens Motor Setup with *+ New motor* selected; the new slot is
-  only kept if you finish the setup.
-- **Remove a motor** with the **Remove** button next to it. Its board is released. The motors after it
-  move down one number, and their boards are renumbered over the radio automatically. Their setup
-  data moves with them.
-- **Remove Unused** removes every motor that hasn't been set up and has no board reporting.
+**Adding and removing birds.** A new install starts with one.
+- **Add a bird** with **Add a bird…** (panel Service view, or the Moves screen). It opens Motor
+  Setup with *+ New motor* selected; the new position is only kept if you finish the setup.
+- **Remove a bird** with the **Remove** button next to it on the Moves screen. Its board is
+  released. The birds after it move down one number, and their boards are renumbered over the
+  radio automatically. Their setup data moves with them.
 
 **How a motor knows its position after a power cut.** The encoder reports the shaft angle
 exactly, but only within one turn. It doesn't count turns.
@@ -251,17 +233,25 @@ bash deploy/install_kiosk.sh   # boots straight into the operator panel
 sudo reboot
 ```
 
-**Orientation:** the Touch Display 2 is a portrait panel. To get landscape, set the
-orientation once in **Control Centre → Screens**, then check that touches land where you tap.
+**Orientation:** the Touch Display 2 is a portrait panel (720 wide, 1280 tall). The panel and
+Motor Setup pages turn themselves a quarter turn whenever the screen is taller than wide, so
+they come up landscape with no display settings to change, and touches land where you tap. If
+that is upside down for the way your screen is mounted, press **Service → Flip screen upside
+down** (remembered on that screen). Leave the desktop's own orientation setting at its default.
 
 **What the panel offers** (`http://<pi>:8080/panel`, also usable from any tablet):
 
-| Screen | What techs can do |
+| View | What techs can do |
 |---|---|
-| Run | See what's playing. Run Show, Hold, Park. Live position gauges for every axis; an amber outline marks a motor being slowed to its limit. |
-| Axes | Status cards (link, homed, enabled, supply, encoder error, signal, faults). Per axis: Identify, Home, jog ±10/±50 mm, Set Zero, Release. Assign new nodes. |
-| Flap | The four knobs (top, bottom, seconds per flap, delay between birds) as − / + buttons, *Set to fastest the motors can do*, and the power-up toggles. |
-| System | Address of the Moves screen, bridge/radio health, startup sequence, home all, event log. |
+| Run (always shown) | **Run**, **Hold**, **Park at top**, and **STOP ALL**. The height of every bird. The four knobs of the flap as − / + buttons, and *Set to fastest the motors can do*. Any fault is named in plain words along the bottom edge. |
+| Service (button, top right) | One line per bird (Ready, or what is wrong) with a **Set up** button that opens Motor Setup. **Add a bird…**, **Flip screen upside down**, and the event log. |
+
+Run and Park ask for confirmation when the motors are off, then switch them on. There is no
+separate enable step on the panel. Jogging a bird by hand is done inside Motor Setup.
+
+**If the controller restarts**, the panel covers itself with *Controller not responding* and
+reconnects on its own. It never needs a manual refresh, and it always loads the current pages
+after an update.
 
 **Typing:** the panel never needs text entry. Every value is a stepper, toggle or button, so
 it doesn't depend on an on-screen keyboard (Raspberry Pi OS's keyboard doesn't appear over a
@@ -337,13 +327,12 @@ A motor that hasn't been tested uses a cautious default (150 mm/s and 300 mm/s²
 about 72 motor RPM on a 40 mm spool). The Birds table shows which motors are still on the
 default.
 
-**To get more speed out of the same motor**, change these under Moves screen → Settings, then
-run the speed test again:
-- **Run current** (default 60%). More current is more torque, and more heat.
-- **Supply voltage** (default 20 V, the most the PD Stepper requests).
-- **Driver mode.** *Auto* is quiet when slow and strong when fast. *Always quiet* is weak at speed.
+**To get more speed out of the same motor**, raise **Motor current** (default 60%) under Moves
+screen → Settings, then run the speed test again. More current is more torque, and more heat.
+Supply voltage (20 V) and driver mode (quiet when slow, strong when fast) are already at their
+best values and are not on the screen; they can still be changed in `host/config.json`.
 
-If the motor is the limit at 100% current and 20 V, software can't go further. A shorter stroke,
+If the motor is the limit at 100% current, software can't go further. A shorter stroke,
 a larger spool (more cable per turn, less torque) or a different motor or driver are the options.
 
 ### Adding another move later
@@ -405,7 +394,7 @@ can be edited in the file (restart the controller afterwards).
     on the PD Stepper's supply input, or a small UPS for the PoE switch.
   - Watch the node's USB serial output: it prints `rec_clean` and `restored` at each status
     line.
-- **Pi software** is covered by 46 automated tests. They include:
+- **Pi software** is covered by 43 automated tests. They include:
   - a full simulated power-up → arm → play sequence;
   - power cuts with and without a successful save, and ten power cuts in a row with no
     position drift;

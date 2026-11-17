@@ -71,7 +71,7 @@ function birdFault(i) {
   if (f.includes("overtemp")) return "Driver over temperature";
   if (f.includes("slip")) return "Position error (slipping?)";
   if (!tk.commissioned[i] || !f.includes("calibrated")) return "Not set up: run Motor Setup";
-  if (!f.includes("homed") && tk.kinds[i] !== "continuous") return "Position unknown: Motor Setup → Find home";
+  if (!f.includes("homed")) return "Position unknown: Motor Setup → Find top only";
   return "";
 }
 
@@ -214,17 +214,12 @@ $("#birdTable").addEventListener("click", (ev) => {
   if (confirm(`Remove ${name}? Its board is released and its setup is discarded. Birds after it move down one number.`)) send("remove_motor", { id: i });
 });
 
-// ------------------------------------------------------------ settings (the ones that affect speed)
+// ------------------------------------------------------------ settings: only what matters day to day
+// Supply voltage (20 V) and the driver mode (quiet when slow, strong when fast) are already at
+// their best values in config.json and are left alone here.
 const SETTINGS = [
-  { key: "run_current_pct", label: "Run current", unit: "%", min: 10, max: 100, step: 5,
-    help: "More current is more torque (and more heat in the motor and driver)." },
-  { key: "pd_volts", label: "Supply voltage", unit: "V", options: [9, 12, 15, 20],
-    help: "Asked of the USB-C PD supply. 20 V gives the most torque at speed." },
-  { key: "driver_mode", label: "Driver mode", options: ["auto", "stealth", "spread"],
-    labels: { auto: "Auto", stealth: "Always quiet", spread: "Always strong" },
-    help: "Quiet mode is silent but weak at speed. Auto is quiet when slow and strong when fast." },
-  { key: "switch_rpm", label: "Auto switch speed", unit: "RPM", min: 30, max: 1000, step: 10,
-    help: "In Auto, the motor speed above which the driver changes to the strong mode." },
+  { key: "run_current_pct", label: "Motor current", unit: "%", min: 10, max: 100, step: 5,
+    help: "More current is more torque, so more speed before the motor slips, and more heat. Run the speed test again after changing it." },
 ];
 function renderSettings() {
   const mech = S.config.mechanics;

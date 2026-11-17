@@ -5,94 +5,67 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Bloom Birds Panel</title>
 <link rel="stylesheet" href="/static/panel.css">
+<script src="/static/rotate.js"></script>
 </head>
 <body>
 <div class="panel-app">
 
   <header class="top">
-    <div class="brand"><span class="appmark" aria-hidden="true"></span><span>Bloom Birds <b>Operator</b></span></div>
+    <div class="brand"><span class="appmark" aria-hidden="true"></span><span>Bloom <b>Birds</b></span></div>
     <div class="lights" id="lights"></div>
+    <button class="big svc" id="btnService" aria-pressed="false">Service</button>
     <button class="big stop" id="btnStop"><span class="sq"></span>STOP ALL</button>
-    <button class="big enable" id="btnEnable" aria-pressed="false"><span class="led" id="enLed"></span><span id="enText">DISABLED</span></button>
   </header>
 
-  <nav class="side" role="tablist">
-    <button class="nav active" data-view="run">Run</button>
-    <button class="nav" data-view="axes">Axes</button>
-    <button class="nav" data-view="flap">Flap</button>
-    <button class="nav" data-view="system">System</button>
-  </nav>
-
-  <main class="content">
-    <!-- RUN -->
+  <main class="content" style="position:relative">
+    <!-- RUN: the only screen needed day to day -->
     <section class="view active" id="v-run">
-      <div class="run-grid">
-        <div class="box now">
-          <div class="box-h">Now Playing</div>
-          <div class="now-mode" id="nowMode">—</div>
-          <div class="now-clip" id="nowClip">—</div>
-          <div class="bar"><div class="bar-fill" id="nowBar"></div></div>
-          <div class="now-meta"><span id="nowTime">—</span><span id="nowNext"></span></div>
-          <div class="now-adj" id="nowAdj"></div>
-        </div>
-        <div class="box ctl">
-          <div class="box-h">Show Control</div>
-          <div class="btn-grid">
-            <button class="big" data-cmd="play"><span class="gl">▶</span>Run Show</button>
-            <button class="big" data-cmd="hold"><span class="gl">||</span>Hold</button>
-            <button class="big" data-cmd="park"><span class="gl">↑</span>Park (to home)</button>
-          </div>
-        </div>
-        <div class="box gauges">
-          <div class="box-h">Axis Positions <span class="h-note">distance from home · amber outline = slowed to the motor's limit</span></div>
-          <canvas id="gauges" aria-label="Position of every axis"></canvas>
-        </div>
-      </div>
-    </section>
-
-    <!-- AXES -->
-    <section class="view" id="v-axes">
-      <div class="axes-wrap">
-        <div class="axis-cards" id="axisCards"></div>
-        <div class="box axis-actions" id="axisActions"></div>
-      </div>
-    </section>
-
-    <!-- FLAP -->
-    <section class="view" id="v-flap">
-      <div class="adjust-grid" id="flapGrid"></div>
-    </section>
-
-    <!-- SYSTEM -->
-    <section class="view" id="v-system">
-      <div class="system-grid">
+      <div class="run3">
         <div class="box">
-          <div class="box-h">Controller</div>
-          <div class="kv" id="sysInfo"></div>
-          <div class="count-row"><span>Number of motors</span>
-            <div class="stepper"><button class="mid" data-count="-1" aria-label="One fewer motor">−</button><div class="step-val" id="motorCount">–</div><button class="mid" data-count="1" aria-label="One more motor">+</button></div></div>
-          <div class="btn-col">
-            <button class="mid" data-sys="autostart">Run Startup Sequence</button>
-            <button class="mid" data-sys="home">Home All Axes</button>
-            <button class="mid" data-sys="push_config">Resend Axis Settings</button>
-            <button class="mid" data-sys="add_motor">Add Motor…</button>
-            <button class="mid" data-sys="setup">Motor Setup…</button>
-            <button class="mid" data-sys="remove_unused">Remove Unused Motors</button>
-            <button class="mid sim-only" data-sys="sim_cut" hidden>Sim: power cut</button>
-            <button class="mid sim-only" data-sys="sim_cut_fail" hidden>Sim: power cut, save fails</button>
+          <div class="state" id="state">—</div>
+          <div class="state-sub" id="stateSub"></div>
+          <div class="cmds">
+            <button class="big run" data-cmd="run"><span class="gl">▶</span>Run</button>
+            <button class="big" data-cmd="hold"><span class="gl">||</span>Hold</button>
+            <button class="big" data-cmd="park"><span class="gl">↑</span>Park at top</button>
           </div>
         </div>
-        <div class="box fill">
+        <div class="box">
+          <div class="box-h">Birds <span class="h-note">mm of cable below the top</span></div>
+          <canvas id="gauges" aria-label="Height of every bird"></canvas>
+        </div>
+        <div class="box">
+          <div class="knobs" id="knobs"></div>
+          <button class="mid wide" id="btnFastest">Set to fastest the motors can do</button>
+          <div class="fit-line" id="fit"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SERVICE: setting up birds, the log, turning the screen -->
+    <section class="view" id="v-service">
+      <div class="svc-grid">
+        <div class="box">
+          <div class="box-h">Birds</div>
+          <div class="bird-list" id="birdList"></div>
+          <div class="svc-btns">
+            <button class="mid" id="btnAdd">Add a bird…</button>
+            <button class="mid" id="btnRotate">Flip screen upside down</button>
+          </div>
+          <p class="hint" id="addr"></p>
+        </div>
+        <div class="box">
           <div class="box-h">Event Log</div>
           <div class="log" id="log"></div>
         </div>
       </div>
     </section>
+    <div class="offline" id="offline" hidden>Controller not responding. Reconnecting…</div>
   </main>
 
   <footer class="status">
     <span id="stState">Connecting…</span>
-    <span id="stException" class="exc">No exceptions</span>
+    <span id="stException" class="exc">No faults</span>
   </footer>
 </div>
 

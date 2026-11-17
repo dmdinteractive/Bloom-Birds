@@ -21,15 +21,24 @@ from aiohttp import WSMsgType, web
 
 from . import motion as M
 from . import protocol as P
-from .config import KINDS, relayout_motors
+from .config import relayout_motors
 from .engine import Engine
 
 log = logging.getLogger("kinetic.server")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
+@web.middleware
+async def no_cache(request, handler):
+    """Pages and scripts are always re-checked, so a software update shows up on the Pi's
+    screen as soon as the controller restarts (no stale copy in the kiosk browser)."""
+    resp = await handler(request)
+    resp.headers.setdefault("Cache-Control", "no-cache")
+    return resp
+
+
 def create_app(engine: Engine) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[no_cache])
     clients: set[web.WebSocketResponse] = set()
 
     async def index(_req):
@@ -47,7 +56,6 @@ def create_app(engine: Engine) -> web.Application:
             "show": engine.show,
             "moves": M.MOVES,
             "steps_per_mm": engine.cfg.steps_per_mm,
-            "kinds": KINDS,
             "size_presets": engine.SIZE_PRESETS,
             "simulate": engine.cfg.data.get("simulate", False),
             "host": host_info(),
@@ -63,15 +71,7 @@ def create_app(engine: Engine) -> web.Application:
         if "layout_preset" in body:
             n = int(body.pop("layout_preset_count", engine.cfg.motor_count))
             body["motors"] = relayout_motors(engine.cfg.motors, max(1, min(16, n)), body.pop("layout_preset"))
-        old_kinds = {m["id"]: m.get("kind", "spool") for m in engine.cfg.motors}
         engine.cfg.update(body)
-        for m in engine.cfg.motors:
-            before, after = old_kinds.get(m["id"], "spool"), m.get("kind", "spool")
-            if before != after and "continuous" in (before, after):
-                # switching between position and speed control: the taught setup no longer applies
-                m["commissioned"] = False
-                m.pop("bottom_fs", None)
-                engine.event(f"{m.get('name', 'Motor')} changed to {after}: run Motor Setup for it", "warn")
         engine.cfg.save()
         engine.push_config()
         engine.push_limits()
@@ -104,12 +104,15 @@ def create_app(engine: Engine) -> web.Application:
             last_event_t = engine.events[-1]["t"] if engine.events else 0
             while True:
                 await asyncio.sleep(0.05)
-                if not clients:
-                    continue
-                snap = engine.snapshot()
+                # track new log lines even with no screen connected, so a screen that connects
+                # later doesn't get them twice (it is sent the whole log when it connects)
                 new_events = [e for e in engine.events if e["t"] > last_event_t]
                 if new_events:
                     last_event_t = new_events[-1]["t"]
+                if not clients:
+                    continue
+                snap = engine.snapshot()
+                if new_events:
                     snap["events"] = new_events
                 data = json.dumps(snap)
                 for ws in list(clients):
@@ -208,7 +211,7 @@ def handle_command(engine: Engine, msg: dict):
     elif c == "wiz_dir_answer":
         engine.wiz_direction_answer(bool(msg.get("correct", msg.get("lowered"))))
     elif c == "wiz_mech":
-        engine.wiz_mechanism(str(msg["kind"]), msg.get("size"), msg.get("bidirectional"))
+        engine.wiz_spool(msg.get("size"))
     elif c == "wiz_encoder":
         engine.wiz_encoder_check()
     elif c == "wiz_top":

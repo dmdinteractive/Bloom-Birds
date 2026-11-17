@@ -213,9 +213,9 @@ def test_setup_wizard_on_a_miswired_board(rig):
         old = next(n for n in tx.nodes if n.mac == "5E:00:00:00:00:03")
         assert old.id == P.ID_UNASSIGNED          # previous board released from the slot
 
-        # 0. mechanism: it drives a cable spool
-        assert eng.wizard["step"] == "mechanism"
-        eng.wiz_mechanism("spool")
+        # 0. spool diameter
+        assert eng.wizard["step"] == "spool"
+        eng.wiz_spool(40)
         await idle()
         assert eng.wizard["step"] == "direction"
 
@@ -395,94 +395,7 @@ def test_set_motor_count(rig):
     assert cfg.motor_count == 2
 
 
-# ---------------------------------------------------------------- other mechanisms
-
-def test_rotary_motor_moves_in_degrees(rig):
-    cfg, tx, eng = rig
-    cfg.motors[0].update({"kind": "rotary", "size": 5.0})          # 5:1 gearbox
-    spu = cfg.spu(0)
-    assert abs(spu - 3200 / 72) < 1e-6                             # 72 output degrees per motor turn
-    cfg.motors[0]["travel_mm"] = 180.0                             # 0..180 degrees
-    eng.send_cmd(P.C_SET_LIMITS, 0, args=[0, 0, 0])
-    eng.push_config(0)
-
-    async def go():
-        t = asyncio.create_task(eng.run())
-        await asyncio.sleep(0.6)
-        eng.arm(True)
-        eng.hold_at([0.5] * cfg.motor_count)
-        await asyncio.sleep(9)
-        t.cancel()
-    asyncio.run(go())
-    assert abs(node(tx, 0).steps / spu - 90.0) < 1.0               # half of 180 degrees
-
-
-def test_continuous_motor_runs_at_speed_and_respects_limits(rig):
-    cfg, tx, eng = rig
-    cfg.motors[0].update({"kind": "continuous", "size": 1.0, "max_speed": 1.0, "max_accel": 2.0})
-    cfg.motors[1].update({"kind": "continuous", "size": 1.0, "max_speed": 1.0, "max_accel": 2.0})
-    eng.send_cmd(P.C_SET_LIMITS, 0, args=[0, 0, 0])               # M1: set up as continuous (no limits)
-    # M2's board still has taught limits -> it must refuse to free-run
-    eng.push_config(0)
-    eng.push_config(1)
-    samples = []
-
-    async def go():
-        t = asyncio.create_task(eng.run())
-        await asyncio.sleep(0.6)
-        eng.arm(True)
-        eng.hold_at([0.5] * cfg.motor_count)
-        await asyncio.sleep(4)
-        s0, m2a = node(tx, 0).steps, node(tx, 1).steps
-        await asyncio.sleep(2)
-        samples.extend([(node(tx, 0).steps - s0) / 2, node(tx, 1).steps - m2a])
-        t.cancel()
-    asyncio.run(go())
-    rate, m2_moved = samples
-    assert abs(rate / cfg.spu(0) - 0.5) < 0.05                    # 0.5 rev/s = half of max
-    assert abs(m2_moved) < cfg.spu(1) * 0.05                       # limited board ignored velocity mode
-    assert abs(eng.out_mm[0] - 0.5) < 0.01                         # screens show the speed
-
-
-def test_wizard_for_continuous_motor_skips_limits(rig):
-    cfg, tx, eng = rig
-    fresh = next(n for n in tx.nodes if n.id == P.ID_UNASSIGNED)
-
-    async def idle():
-        await asyncio.sleep(0.4)
-        for _ in range(300):
-            if not eng.wizard or not eng.wizard["busy"]:
-                return
-            await asyncio.sleep(0.1)
-        raise AssertionError("wizard step hung")
-
-    async def go():
-        t = asyncio.create_task(eng.run())
-        await asyncio.sleep(0.6)
-        eng.wiz_start(fresh.mac, cfg.motor_count)
-        await idle()
-        eng.wiz_mechanism("continuous", 1.0, True)
-        await idle()
-        assert eng.wizard_snapshot()["steps"] == ["mechanism", "direction", "encoder", "test", "speed", "finish"]
-        before = fresh.phys_fs
-        eng.wiz_direction_test()
-        await idle()
-        eng.wiz_direction_answer(fresh.phys_fs > before)
-        await idle()
-        eng.wiz_encoder_check()
-        await idle()
-        assert eng.wizard["error"] == "" and eng.wizard["step"] == "test"
-        eng.wiz_test()
-        await idle()
-        assert eng.wizard["test_done"]
-        eng.wiz_finish()
-        await asyncio.sleep(0.6)
-        t.cancel()
-    asyncio.run(go())
-    m = cfg.motors[-1]
-    assert m["kind"] == "continuous" and m["commissioned"] and m["bidirectional"]
-    assert "bottom_fs" not in m and not fresh.limits_on()
-
+# ---------------------------------------------------------------- speed test
 
 def test_speed_test_finds_limits_below_the_stall_and_keeps_position(rig):
     """The simulated motors stall above 600 RPM / 40 rev/s² (like a real stepper with a load).

@@ -1,4 +1,4 @@
-/* Kinetic operator panel — 1280×720 touch layout, same neutral industrial palette as the editor. */
+/* Bloom Birds touch panel — 1280×720 landscape layout. rotate.js turns it when the screen is portrait. */
 :root {
   --win: #e3e5e8; --group: #f3f4f5; --field: #ffffff; --line: #a7adb4; --line-2: #c9cdd2;
   --edge: #8a929b; --ink: #1b1f23; --ink-2: #4a525b; --ink-3: #6d757e;
@@ -11,7 +11,13 @@
 html, body { margin: 0; height: 100%; background: var(--win); color: var(--ink); font: 15px/1.3 var(--font);
   user-select: none; -webkit-user-select: none; touch-action: manipulation; overscroll-behavior: none; overflow: hidden; }
 button { font: inherit; color: inherit; }
-.panel-app { height: 100vh; display: grid; grid-template-columns: 148px 1fr; grid-template-rows: 64px 1fr 30px; }
+.panel-app { height: 100%; display: grid; grid-template-columns: 1fr; grid-template-rows: 64px 1fr 30px; }
+
+/* ---------- rotation (see rotate.js): the body is turned, and sized to the turned screen ---------- */
+html.rot90 body, html.rot270 body { position: fixed; top: 0; left: 0; width: 100vh; height: 100vw; transform-origin: top left; }
+html.rot90 body { transform: rotate(90deg) translateY(-100%); }
+html.rot270 body { transform: rotate(-90deg) translateX(-100%); }
+html.rot180 body { transform: rotate(180deg); }
 
 /* ---------- top bar ---------- */
 .top { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: #d4d7db; border-bottom: 1px solid var(--line); }
@@ -162,3 +168,39 @@ button { font: inherit; color: inherit; }
 .count-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-size: 16px; }
 .card.empty { border-style: dashed; }
 .card.empty .card-fault { color: var(--ink-3); font-weight: 400; }
+
+/* ---------- run view: buttons | birds | knobs ---------- */
+.run3 { display: grid; grid-template-columns: 250px 1fr 400px; gap: 10px; height: 100%; }
+.run3 .box { display: flex; flex-direction: column; }
+.state { font-size: 24px; font-weight: 600; letter-spacing: .04em; }
+.state.stopped { color: var(--ink-3); }
+.state-sub { font-size: 13px; color: var(--ink-2); min-height: 34px; margin: 2px 0 8px; }
+.cmds { display: flex; flex-direction: column; gap: 10px; flex: 1; }
+.cmds .big { flex: 1; font-size: 22px; justify-content: flex-start; padding: 0 20px; }
+.cmds .big.run { border-color: #1f6e2f; background: #dde9df; }
+.cmds .big.cur { box-shadow: inset 6px 0 0 var(--ink-2); }
+#gauges { flex: 1; width: 100%; min-height: 0; display: block; }
+.knobs { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.knob-row { flex: 1; display: grid; grid-template-rows: auto 1fr; }
+.knob-row .lbl { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); margin-bottom: 3px; }
+.knob-row .stepper .big { min-width: 84px; font-size: 30px; }
+.knob-row .step-val { flex: 1; font-size: 28px; }
+.fit-line { font-size: 13px; color: var(--ink-2); min-height: 34px; margin-top: 6px; }
+.fit-line.bad { color: var(--bad); font-weight: 600; }
+.wide { width: 100%; }
+.top .svc { min-width: 110px; }
+.top .svc[aria-pressed="true"] { background: var(--sel); border-color: var(--sel-edge); }
+
+/* ---------- service view ---------- */
+.svc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; height: 100%; }
+.svc-grid .box { display: flex; flex-direction: column; min-height: 0; }
+.bird-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; -webkit-overflow-scrolling: touch; }
+.bird-row { display: grid; grid-template-columns: 70px 1fr auto; gap: 10px; align-items: center; background: var(--field); border: 1px solid var(--line-2); padding: 6px 8px; }
+.bird-row b { font-size: 18px; }
+.bird-row .st { font-size: 14px; }
+.bird-row .st.bad { color: var(--bad); font-weight: 600; }
+.bird-row .st small { display: block; color: var(--ink-3); font-family: var(--mono); font-size: 12px; font-weight: 400; }
+.svc-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.offline { position: absolute; inset: 64px 0 30px 0; background: rgba(227,229,232,.92); display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 600; color: var(--bad); z-index: 5; }
+.offline[hidden] { display: none; }

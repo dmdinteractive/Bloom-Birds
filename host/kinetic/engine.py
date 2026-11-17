@@ -135,8 +135,6 @@ class Engine:
     def _maybe_restore(self, mac: str, st: P.Status):
         if st.has("homed") or st.has("homing") or not st.has("calibrated") or st.id == P.ID_UNASSIGNED:
             return
-        if 0 <= st.id < self.cfg.motor_count and self.cfg.is_continuous(st.id):
-            return
         if self.cfg.mech["home_mode"] != "memory" or (self.wizard and self.wizard.get("mac") == mac):
             return
         known = self.last_known.get(mac)
@@ -168,12 +166,11 @@ class Engine:
         return best
 
     def actual_mm(self) -> list[float | None]:
-        """Where each motor reports it is, in its own units (None for continuous rotation,
-        where only the commanded speed is shown)."""
+        """Where each motor reports it is, in mm (None if its board isn't reporting)."""
         out = []
         for i in range(self.cfg.motor_count):
             n = self.node_by_id(i)
-            out.append(n["status"].pos / self.cfg.spu(i) if n and not self.cfg.is_continuous(i) else None)
+            out.append(n["status"].pos / self.cfg.spu(i) if n else None)
         return out
 
     def _new_limiter(self, n: int) -> M.Limiter:
@@ -201,9 +198,7 @@ class Engine:
         for i in ids:
             if not self.cfg.motors[i].get("commissioned"):
                 continue
-            if self.cfg.is_continuous(i):
-                self.send_cmd(P.C_SET_LIMITS, i, args=[0, 0, 0])      # free to spin
-            elif self.cfg.motors[i].get("bottom_fs"):
+            if self.cfg.motors[i].get("bottom_fs"):
                 self.send_cmd(P.C_SET_LIMITS, i, args=[1, 0, self.cfg.bottom_usteps(i)])
 
     def home(self, target: int = P.TARGET_ALL):
@@ -267,9 +262,9 @@ class Engine:
     def fit(self) -> dict:
         """How the move sits against each bird's speed and acceleration limits."""
         n = self.cfg.motor_count
-        active = [bool(m.get("commissioned")) and not self.cfg.is_continuous(i) for i, m in enumerate(self.cfg.motors)]
+        active = [bool(m.get("commissioned")) for m in self.cfg.motors]
         if not any(active):
-            active = [not self.cfg.is_continuous(i) for i in range(n)]
+            active = [True] * n
         return M.move_fit(self.move(), [self.cfg.travel(i) for i in range(n)], [self.cfg.vmax(i) for i in range(n)],
                           [self.cfg.amax(i) for i in range(n)], active)
 
@@ -342,7 +337,7 @@ class Engine:
         """Wind everything up to home, at the motors' max speed/accel."""
         self.mode = "park"
         self._switch(HoldSource([0.0] * self.cfg.motor_count), 0)
-        self.event("Parking: moving all motors to home")
+        self.event("Parking: moving all birds to the top")
 
     def arm(self, on: bool):
         if on and self.wizard:
@@ -365,9 +360,6 @@ class Engine:
 
     # ================================================================ tick
     def _mm_to_norm(self, i: int, mm: float) -> float:
-        if self.cfg.is_continuous(i):           # a speed: invert speed_from_norm
-            vmax = self.cfg.vmax(i) or 1.0
-            return M.clamp((mm / vmax + 1) / 2 if self.cfg.bidirectional(i) else mm / vmax)
         tr = self.cfg.travel(i)
         return M.clamp((mm - self.cfg.trim(i)) / tr) if tr > 0 else 0.0
 
@@ -407,22 +399,9 @@ class Engine:
                 prev = (list(prev) + [0.0] * n)[:n]
                 norm = M.blend(prev, norm, w)
         self.last_norm = norm
-        cont = [self.cfg.is_continuous(i) for i in range(n)]
-        # continuous rotation: the value is a speed, not a height
-        self.desired_mm = [self.cfg.speed_from_norm(i, v) if cont[i] else self._norm_to_mm(i, v)
-                           for i, v in enumerate(norm)]
+        self.desired_mm = [self._norm_to_mm(i, v) for i, v in enumerate(norm)]
         hi = [self.cfg.travel(i) for i in range(n)]
-        lo = [-hi[i] if cont[i] else 0.0 for i in range(n)]
         out_x, out_v = self.limiter.step(self.desired_mm, dt, [0.0] * n, hi)
-        for i in range(n):
-            if cont[i]:                         # ramp the speed at the motor's acceleration limit
-                cur = self.out_mm[i] if i < len(self.out_mm) else 0.0
-                a = self.cfg.amax(i) * dt
-                tgt = min(max(self.desired_mm[i], lo[i]), hi[i])
-                out_x[i] = cur + max(-a, min(a, tgt - cur))
-                out_v[i] = out_x[i]             # speed in units/s
-                self.limiter.x[i], self.limiter.v[i] = 0.0, 0.0
-                self.limiter.limited[i] = False
         self.out_mm, self.out_v = out_x, out_v
 
         if self.armed:
@@ -435,10 +414,7 @@ class Engine:
         targets = []
         for i, (x, v) in enumerate(zip(self.out_mm, self.out_v)):
             spu = self.cfg.spu(i)
-            if self.cfg.is_continuous(i):
-                targets.append((P.POS_VELOCITY, v * spu))   # run at a speed
-            else:
-                targets.append((x * spu, v * spu))
+            targets.append((x * spu, v * spu))
         self.seq = (self.seq + 1) & 0xFFFF
         self.tx.send(P.pack_frame(self.seq, flags, targets))
 
@@ -500,7 +476,7 @@ class Engine:
                 if cfg.motors[i].get("commissioned") and setup_mac and setup_mac != n["mac"]:
                     self.event(f"M{i + 1} is now driven by a different board ({n['mac']}) than the one that was set up "
                                f"({setup_mac}). Run Motor Setup for M{i + 1}.", "warn")
-                if st.has("homed") or cfg.is_continuous(i):
+                if st.has("homed"):
                     continue
                 if not st.has("calibrated"):
                     self.event(f"M{i + 1} has not been set up yet: Setup > Motor Setup", "warn")
@@ -520,9 +496,7 @@ class Engine:
             self.set_zero()
             await asyncio.sleep(0.5)
 
-        # ready = knows its position, or spins continuously (speed mode needs no position)
-        homed = [i for i in range(cfg.motor_count) if (s := self.node_by_id(i))
-                 and (s["status"].has("homed") or (cfg.is_continuous(i) and cfg.motors[i].get("commissioned")))]
+        homed = [i for i in range(cfg.motor_count) if (s := self.node_by_id(i)) and s["status"].has("homed")]
         if len(homed) < len(want):
             self.event(f"Only {len(homed)}/{len(want)} set-up motors know their position; the rest will not move", "warn")
         if cfg.data.get("autoplay", True) and homed:
@@ -639,20 +613,17 @@ class Engine:
         if self.wizard is not None:
             self.wizard.update(kw)
 
-    # ---- mechanism-aware helpers (distances are in the motor's own units)
-    TEST_STEP = {"spool": 10.0, "linear": 5.0, "rotary": 15.0, "continuous": 0.25}
-    JOG_STEPS = {"spool": [50, 10, 1], "linear": [20, 5, 0.5], "rotary": [45, 10, 1], "continuous": [1, 0.25, 0.05]}
-    SIZE_PRESETS = {"spool": [20, 25, 30, 40, 50, 60, 80, 100], "linear": [1, 2, 4, 5, 8, 10, 12, 20, 40],
-                    "rotary": [1, 2, 3, 4, 5, 10, 14, 19, 27, 50, 100], "continuous": [1, 2, 3, 4, 5, 10, 14, 19, 27, 50, 100]}
+    # ---- distances are in mm of cable
+    TEST_STEP = 10.0                       # direction test move
+    JOG_STEPS = [50, 10, 1]
+    SIZE_PRESETS = [20, 25, 30, 40, 50, 60, 80, 100]     # spool diameters offered as buttons
 
     def _wiz_steps(self, w: dict) -> list[str]:
         if w.get("speed_only"):
             return ["speed", "finish"]
         if w["recover"]:
             return ["top", "finish"]
-        if self.cfg.is_continuous(w["motor"]):
-            return ["mechanism", "direction", "encoder", "test", "speed", "finish"]
-        return ["mechanism", "direction", "encoder", "top", "bottom", "test", "speed", "finish"]
+        return ["spool", "direction", "encoder", "top", "bottom", "test", "speed", "finish"]
 
     def _wiz_next(self, after: str) -> str:
         steps = self._wiz_steps(self.wizard)
@@ -679,10 +650,10 @@ class Engine:
         if n["status"].id != motor:
             self.assign(mac, motor)
         m = self.cfg.motors[motor]
-        recover = bool(recover and m.get("commissioned") and m.get("bottom_fs") and not self.cfg.is_continuous(motor))
+        recover = bool(recover and m.get("commissioned") and m.get("bottom_fs"))
         speed_only = bool(speed_only and m.get("commissioned") and not recover and not added)
         self.wizard = {"mac": mac, "motor": motor, "recover": recover, "speed_only": speed_only,
-                       "step": "speed" if speed_only else "top" if recover else "mechanism",
+                       "step": "speed" if speed_only else "top" if recover else "spool",
                        "busy": False, "msg": "", "error": "", "speed": None,
                        "dir_tested": False, "encoder_ok": False, "top_set": False, "bottom_mm": None,
                        "test_done": False, "was_commissioned": bool(m.get("commissioned")), "added": added}
@@ -736,32 +707,20 @@ class Engine:
         await asyncio.sleep(0.3)
         return ok
 
-    def wiz_mechanism(self, kind: str, size: float | None = None, bidirectional: bool | None = None):
-        """Step 1: what this motor drives. Changing the type discards limits taught for the old one."""
+    def wiz_spool(self, size: float | None = None):
+        """Step 1: the spool's diameter (how much cable one turn winds)."""
         w = self.wizard
-        if not w or w["busy"] or kind not in KINDS:
+        if not w or w["busy"]:
             return
         i = w["motor"]
         m = self.cfg.motors[i]
-        if self.cfg.kind(i) != kind:
-            m.pop("bottom_fs", None)
-            m["travel_mm"] = None
-            m.pop("max_speed", None)
-            m.pop("max_accel", None)
-        m["kind"] = kind
         if size:
-            m["size"] = float(size)
-        elif kind != "spool":
-            m["size"] = KINDS[kind]["size_default"]
-        else:
-            m.pop("size", None)
-        if bidirectional is not None:
-            m["bidirectional"] = bool(bidirectional)
+            m["size"] = min(500.0, max(5.0, float(size)))
         self.cfg.save()
         self.push_config(i)
         self.enable(i, True)
-        self._wiz_set(step=self._wiz_next("mechanism"), msg=f"{KINDS[kind]['label']} selected.", error="")
-        self.event(f"M{i + 1}: mechanism set to {KINDS[kind]['label']}")
+        self._wiz_set(step=self._wiz_next("spool"), msg=f"Spool diameter {self.cfg.size(i):g} mm.", error="")
+        self.event(f"M{i + 1}: spool diameter set to {self.cfg.size(i):g} mm")
 
     def wiz_jog(self, dist: float):
         w = self.wizard
@@ -776,7 +735,7 @@ class Engine:
         if not w:
             return
         i = w["motor"]
-        d, unit, info = self.TEST_STEP[self.cfg.kind(i)], self.cfg.unit(i), self.cfg.kind_info(i)
+        d, unit, info = self.TEST_STEP, self.cfg.unit(i), self.cfg.kind_info(i)
 
         async def go():
             self._wiz_set(msg=f"Moving {d:g} {unit}. Watch which way it goes.")
@@ -789,7 +748,7 @@ class Engine:
         if not w or not w["dir_tested"]:
             return
         i = w["motor"]
-        d, unit = self.TEST_STEP[self.cfg.kind(i)], self.cfg.unit(i)
+        d, unit = self.TEST_STEP, self.cfg.unit(i)
 
         async def go():
             if correct:
@@ -824,7 +783,7 @@ class Engine:
             mag = n["status"].magnet_state
             if mag in ("none", "unknown"):
                 raise RuntimeError("No encoder magnet detected. Check the magnet on the back of the motor shaft.")
-            dist = 2 * self.TEST_STEP[self.cfg.kind(i)]
+            dist = 2 * self.TEST_STEP
             for attempt in range(2):
                 self._wiz_set(msg=f"Checking the encoder: moving {dist:g} {unit} and back.")
                 st0 = self._wiz_node()["status"]
@@ -890,7 +849,7 @@ class Engine:
         unit, far, home = self.cfg.unit(i), self.cfg.kind_info(i)["far"], self.cfg.kind_info(i)["home"]
         pos = st.enc if st.enc is not None else st.pos
         dist = pos / self.cfg.spu(i)
-        need = 2 * self.TEST_STEP[self.cfg.kind(i)]
+        need = 2 * self.TEST_STEP
         if dist < need:
             self._wiz_set(error=f"The {far} must be at least {need:g} {unit} past the {home}.")
             return
@@ -906,16 +865,6 @@ class Engine:
             return
         i = w["motor"]
         unit = self.cfg.unit(i)
-        if self.cfg.is_continuous(i):
-            spd = self.cfg.vmax(i) * 0.25
-
-            async def spin():
-                self._wiz_set(msg=f"Spin test: forward at {spd:.2f} {unit} for 3 s, then back.")
-                await self._wiz_move_and_wait(spd * 3, free=True, speed=spd, timeout=20)
-                await self._wiz_move_and_wait(-spd * 3, free=True, speed=spd, timeout=20)
-                self._wiz_set(test_done=True, step=self._wiz_next("test"), msg="Spin test complete.")
-            self._wiz_later(spin())
-            return
         if not w.get("bottom_fs"):
             return
         bottom = w["bottom_mm"]
@@ -951,21 +900,17 @@ class Engine:
             return
         i, mac = w["motor"], w["mac"]
         cfg = self.cfg
-        cont = cfg.is_continuous(i)
         spu = cfg.spu(i)
         upr = cfg.unit_per_rev(i)                       # units per motor revolution
         unit = cfg.unit(i)
         spr = cfg.mech["full_steps_per_rev"] * cfg.mech["microsteps"]
         v_cap = min(self.TEST_RPM_CAP / 60 * upr, self.TEST_STEP_RATE_CAP / spu)
         a_cap = 80 * upr                                # 80 motor rev/s²
-        if cont:
-            stroke, start = 10 * upr, None
-        else:
-            if not w.get("bottom_mm") and not cfg.motors[i].get("bottom_fs"):
-                self._wiz_set(error="Teach both ends before the speed test.")
-                return
-            span = w.get("bottom_mm") or cfg.travel(i)
-            stroke, start = 0.6 * span, 0.2 * span
+        if not w.get("bottom_mm") and not cfg.motors[i].get("bottom_fs"):
+            self._wiz_set(error="Teach both ends before the speed test.")
+            return
+        span = w.get("bottom_mm") or cfg.travel(i)
+        stroke, start = 0.6 * span, 0.2 * span
         v_now, a_now = cfg.vmax(i), cfg.amax(i)
         base_args = cfg.node_config_args(i)
         mech = cfg.mech
@@ -1016,9 +961,8 @@ class Engine:
             """One there-and-back run. True = clean."""
             cfg_accel(a)
             await asyncio.sleep(0.3)
-            moves = [stroke, -stroke] if (not cont or cfg.bidirectional(i)) else [stroke, stroke]
-            for d in moves:
-                self.jog(i, d, free=cont, speed=v)
+            for d in (stroke, -stroke):
+                self.jog(i, d, free=False, speed=v)
                 if not await settle(abs(d) / v + v / a + 8):
                     self.send_cmd(P.C_STOP, i)
                     return False
@@ -1030,19 +974,17 @@ class Engine:
             ok_v = ok_a = None
             stopped = False
             try:
-                if not cont:
-                    self._wiz_set(msg="Moving to the start of the test stroke")
-                    await go_to(start, v_now * 0.5, a_now)
-                    if slipped() > 0.05:
-                        await resync()
+                self._wiz_set(msg="Moving to the start of the test stroke")
+                await go_to(start, v_now * 0.5, a_now)
+                if slipped() > 0.05:
+                    await resync()
                 # 1. top speed. Ramp so the move reaches speed within the first quarter of the
                 # stroke; if that fails, try the same speed once with the gentlest ramp the stroke
                 # allows, so a too-steep ramp isn't mistaken for a too-high speed.
                 async def recover():
-                    if not cont:
-                        if slipped() > 0.05:
-                            await resync()
-                        await go_to(start, v_now * 0.5, a_now)
+                    if slipped() > 0.05:
+                        await resync()
+                    await go_to(start, v_now * 0.5, a_now)
 
                 gentle = False
                 a_clean = a_now
@@ -1107,11 +1049,11 @@ class Engine:
                     if stopped:
                         await self._wait_for(lambda: (n := node()) and not n["status"].has("moving"), 10)
                         await asyncio.sleep(0.5)
-                    if not cont and slipped() > 0.05:
+                    if slipped() > 0.05:
                         await resync()
                     self.send_cmd(P.C_CONFIG, i, args=base_args)    # back to the saved limits
                     await asyncio.sleep(0.3)
-                    if not cont and not stopped:
+                    if not stopped:
                         await go_to(start + stroke / 2, v_now * 0.5, a_now)   # park mid-travel
                         self.send_cmd(P.C_CONFIG, i, args=base_args)
                 except Exception:  # noqa: BLE001 - never leave the test settings on the node
@@ -1153,10 +1095,10 @@ class Engine:
         steps = self._wiz_steps(w)
         if step not in steps:
             return
-        if step in ("mechanism", "direction", "encoder", "top", "bottom") and not w["recover"]:
+        if step in ("spool", "direction", "encoder", "top", "bottom") and not w["recover"]:
             self.send_cmd(P.C_SET_LIMITS, w["motor"], args=[0, 0, 0])   # free again while teaching
             w["test_done"] = False
-        if step in ("mechanism", "direction"):
+        if step in ("spool", "direction"):
             w["dir_tested"] = False
         self._wiz_set(step=step, msg="", error="")
 
@@ -1166,7 +1108,6 @@ class Engine:
             return
         i = w["motor"]
         m = self.cfg.motors[i]
-        cont = self.cfg.is_continuous(i)
         if w.get("speed_only"):
             self.cfg.save()
             self.push_config(i)
@@ -1174,17 +1115,12 @@ class Engine:
             self.event(f"Speed test finished for M{i + 1}")
             self.wizard = None
             return
-        if not w["recover"] and not cont:
+        if not w["recover"]:
             if not (w["top_set"] and w.get("bottom_fs")):
                 self._wiz_set(error="Teach both ends first.")
                 return
             m["bottom_fs"] = round(w["bottom_fs"], 2)
             m["travel_mm"] = None
-        if cont:
-            # continuous rotation has no limits; position memory isn't needed to run
-            self.send_cmd(P.C_SET_LIMITS, i, args=[0, 0, 0])
-            self.send_cmd(P.C_SET_ZERO, i, args=[0])
-            m.pop("bottom_fs", None)
         # pin this motor's directions so later edits to the Mechanics defaults can't flip it
         # (a node that sees its direction change forgets its taught top)
         m["invert_dir"] = self.cfg.motor_flag(i, "invert_dir")
@@ -1195,8 +1131,7 @@ class Engine:
         self.cfg.save()
         self.push_limits(i)
         unit = self.cfg.unit(i)
-        self.event(f"M{i + 1} set up as {self.cfg.kind_info(i)['label'].lower()}" +
-                   ("" if w["recover"] or cont else f": travel {self.cfg.travel(i):.0f} {unit}"))
+        self.event(f"M{i + 1} set up" + ("" if w["recover"] else f": travel {self.cfg.travel(i):.0f} {unit}"))
         self.wizard = None
 
     def wiz_cancel(self):
@@ -1221,13 +1156,11 @@ class Engine:
             return None
         i = w["motor"]
         out = {k: v for k, v in w.items() if k != "bottom_fs"}
-        kind = self.cfg.kind(i)
-        info = KINDS[kind]
+        kind, info = "spool", KINDS["spool"]
         spu = self.cfg.spu(i)
         out.update({"steps": self._wiz_steps(w), "kind": kind, "unit": info["unit"], "home": info["home"],
-                    "far": info["far"], "positive": info["positive"], "jog_steps": self.JOG_STEPS[kind],
-                    "size": self.cfg.size(i), "bidirectional": self.cfg.bidirectional(i),
-                    "test_step": self.TEST_STEP[kind]})
+                    "far": info["far"], "positive": info["positive"], "jog_steps": self.JOG_STEPS,
+                    "size": self.cfg.size(i), "test_step": self.TEST_STEP})
         n = self._wiz_node()
         if n:
             st = n["status"]
