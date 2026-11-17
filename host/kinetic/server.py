@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import socket
 import subprocess
 from pathlib import Path
@@ -41,14 +42,22 @@ def create_app(engine: Engine) -> web.Application:
     app = web.Application(middlewares=[no_cache])
     clients: set[web.WebSocketResponse] = set()
 
-    async def index(_req):
-        return web.FileResponse(WEB_DIR / "index.html")
+    def page(name: str):
+        """Serve a page with a version stamp on every script and stylesheet it loads
+        (/static/panel.css?v=<when the file last changed>). A browser treats a new stamp as a
+        new file, so after an update the Pi's screen can never mix new pages with an old cached
+        stylesheet or script."""
+        async def handler(_req):
+            html = (WEB_DIR / name).read_text()
 
-    async def panel(_req):
-        return web.FileResponse(WEB_DIR / "panel.html")
+            def stamp(m):
+                f = WEB_DIR / m.group(1)
+                return f'/static/{m.group(1)}?v={int(f.stat().st_mtime) if f.exists() else 0}'
+            html = re.sub(r'/static/([\w.-]+\.(?:css|js))', stamp, html)
+            return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-store"})
+        return handler
 
-    async def commission(_req):
-        return web.FileResponse(WEB_DIR / "commission.html")
+    index, panel, commission = page("index.html"), page("panel.html"), page("commission.html")
 
     async def state(_req):
         return web.json_response({
